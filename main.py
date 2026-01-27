@@ -73,6 +73,8 @@ def main():
         import lm_eval
         from lm_eval import utils as lm_eval_utils
         from lm_eval.models.huggingface import HFLM
+        from lm_eval.tasks import initialize_tasks
+        initialize_tasks()
 
         hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
 
