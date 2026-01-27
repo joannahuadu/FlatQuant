@@ -16,3 +16,4 @@ log_*.txt
 *.pth
 modelzoo/*
 outputs/*
+*.out

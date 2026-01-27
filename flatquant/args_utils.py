@@ -21,7 +21,8 @@ supported_models = [
             './modelzoo/meta-llama/Llama-3.3-70B-Instruct', 
             './modelzoo/Qwen/Qwen2.5-7B-Instruct', 
             './modelzoo/Qwen/Qwen2.5-32B-Instruct', 
-            'meta-llama/Llama-3.1-8B'
+            'meta-llama/Llama-3.1-8B',
+            '/gemini/code/checkpoints/models--meta-llama--Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b'
             ]
 supported_datasets = ['wikitext2', 'c4', 'pile']
 

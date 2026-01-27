@@ -33,14 +33,14 @@ def get_wikitext2(nsamples, seqlen, tokenizer, eval_mode=False):
 def get_c4_new(nsamples, seqlen, tokenizer, eval_mode=False):
     if eval_mode:
         valdata = datasets.load_dataset(
-        'allenai/c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation')
+        'allenai/c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation', download_mode="force_redownload")
         valenc = tokenizer(' '.join(valdata[:1100]['text']), return_tensors='pt')
         valenc = valenc.input_ids[:, :(256 * seqlen)]
         valenc = TokenizerWrapper(valenc)
         return valenc
     else:
         traindata = datasets.load_dataset(
-            'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train')
+            'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train', download_mode="force_redownload")
         trainloader = []
         for _ in range(nsamples):
             while True:
