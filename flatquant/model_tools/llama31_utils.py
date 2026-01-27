@@ -13,6 +13,50 @@ from flatquant.flat_linear import FlatQuantizedLinear
 from transformers.models.llama.modeling_llama import LlamaMLP, LlamaAttention, \
                                                      apply_rotary_pos_emb, repeat_kv
 
+@torch.no_grad()
+def _compute_weight_col_norm(weight, weight_scoring):
+    weight = weight.float()
+    if weight_scoring:
+        weight_flat = weight.flatten()
+        num_elements = weight_flat.numel()
+        if num_elements > 1000000:
+            sample_size = min(100000, num_elements)
+            indices = torch.randperm(num_elements, device=weight.device)[:sample_size]
+            weight_sample = weight_flat[indices]
+            q_low = torch.quantile(weight_sample, 0.005)
+            q_high = torch.quantile(weight_sample, 0.995)
+        else:
+            q_low = torch.quantile(weight_flat, 0.005)
+            q_high = torch.quantile(weight_flat, 0.995)
+        within_range = (weight >= q_low) & (weight <= q_high)
+        if within_range.sum() < 2:
+            weight_processed = weight
+        else:
+            w_filtered = weight[within_range]
+            mean = w_filtered.mean()
+            std = w_filtered.std()
+            std = std.clamp(min=1e-8)
+            weight_processed = (weight - mean) / std
+            weight_processed = weight_processed.clamp(
+                min=(q_low - mean) / std,
+                max=(q_high - mean) / std,
+            )
+    else:
+        weight_processed = weight
+
+    return weight_processed.pow(2).sum(dim=0).sqrt()
+
+
+@torch.no_grad()
+def _compute_sparsity_scale_from_fcs(fcs, weight_scoring=True):
+    col_norms = []
+    for fc in fcs:
+        col_norms.append(_compute_weight_col_norm(fc.weight, weight_scoring))
+    col_norms = torch.stack(col_norms, dim=0)
+    w_col_norm = col_norms.max(dim=0)[0]
+    min_norm = w_col_norm.min().clamp(min=1e-5)
+    return (w_col_norm / min_norm).view(1, -1)
+
 
 class FlatQuantLlamaMLP(LlamaMLP):
     def __init__(self, args, module: LlamaMLP):
@@ -25,6 +69,10 @@ class FlatQuantLlamaMLP(LlamaMLP):
 
         self._ori_mode = False
         self.diag_init = args.diag_init
+        self.act_sparsity_n = 0
+        self.act_sparsity_m = 0
+        self.weight_scoring = True
+        self.act_sparsity_location = "pre_trans"
         if self.diag_init == "sq_style":
             self.up_smax = torch.ones_like(self.up_proj.linear.weight.abs().max(dim=0)[0]).cuda() * 1e-5
             self.down_smax = torch.ones_like(self.down_proj.linear.weight.abs().max(dim=0)[0]).cuda() * 1e-5
@@ -42,7 +90,50 @@ class FlatQuantLlamaMLP(LlamaMLP):
         else:
             self.up_gate_trans, self.down_trans = None, None
 
+    def _init_sparsity_scale(self):
+        up_gate_scale = _compute_sparsity_scale_from_fcs(
+            [self.up_proj.linear, self.gate_proj.linear],
+            weight_scoring=self.weight_scoring,
+        )
+        self.up_proj.sparsity_scale = up_gate_scale
+        self.gate_proj.sparsity_scale = up_gate_scale
+        self.down_proj.sparsity_scale = _compute_sparsity_scale_from_fcs(
+            [self.down_proj.linear],
+            weight_scoring=self.weight_scoring,
+        )
+
+    def apply_activation_sparsity(self, x, sparsity_scale):
+        x_shape = x.shape
+        x_2d = x.view(-1, x_shape[-1])
+        if sparsity_scale is None:
+            raise ValueError("sparsity_scale is not set.")
+
+        metric = x_2d.abs().float() * sparsity_scale
+        mask = torch.zeros_like(metric, dtype=torch.bool)
+        for ii in range(0, metric.shape[1], self.act_sparsity_m):
+            group_size = min(self.act_sparsity_m, metric.shape[1] - ii)
+            if group_size < self.act_sparsity_n:
+                continue
+            tmp = metric[:, ii: ii + group_size]
+            idx = torch.topk(tmp, self.act_sparsity_n, dim=1, largest=False)[1]
+            mask.scatter_(1, ii + idx, True)
+
+        x_2d = x_2d.masked_fill(mask, 0)
+        return x_2d.view(x_shape)
+
+    def _maybe_sparse(self, x, sparsity_scale):
+        if (
+            self.act_sparsity_n
+            and self.act_sparsity_m
+            and self.act_sparsity_location == "pre_trans"
+        ):
+            if sparsity_scale is None:
+                raise ValueError("sparsity_scale is not set.")
+            return self.apply_activation_sparsity(x, sparsity_scale)
+        return x
+
     def _trans_forward(self, x):
+        x = self._maybe_sparse(x, self.up_proj.sparsity_scale)
         if self.up_gate_trans is not None:
             x_ts = self.up_gate_trans(x)
         else:
@@ -51,6 +142,7 @@ class FlatQuantLlamaMLP(LlamaMLP):
         gate_states = self.gate_proj(x_ts, qa_trans=self.up_gate_trans)
 
         x_act_fn = self.act_fn(gate_states) * up_states
+        x_act_fn = self._maybe_sparse(x_act_fn, self.down_proj.sparsity_scale)
         if self.down_trans is not None:
             x_ts_2 = self.down_trans(x_act_fn)
         else:
@@ -131,6 +223,10 @@ class FlatQuantLlamaAttention(LlamaAttention):
         self._ori_mode = False
         self._eval_mode = False
         self.diag_init = args.diag_init
+        self.act_sparsity_n = 0
+        self.act_sparsity_m = 0
+        self.weight_scoring = True
+        self.act_sparsity_location = "pre_trans"
         if self.diag_init == "sq_style":
             self.ln_smax = torch.ones_like(self.q_proj.linear.weight.abs().max(dim=0)[0]).cuda() * 1e-5
 
@@ -156,7 +252,51 @@ class FlatQuantLlamaAttention(LlamaAttention):
         else:
             self.vcache_trans = None
 
+    def _init_sparsity_scale(self):
+        qkv_scale = _compute_sparsity_scale_from_fcs(
+            [self.q_proj.linear, self.k_proj.linear, self.v_proj.linear],
+            weight_scoring=self.weight_scoring,
+        )
+        self.q_proj.sparsity_scale = qkv_scale
+        self.k_proj.sparsity_scale = qkv_scale
+        self.v_proj.sparsity_scale = qkv_scale
+        self.o_proj.sparsity_scale = _compute_sparsity_scale_from_fcs(
+            [self.o_proj.linear],
+            weight_scoring=self.weight_scoring,
+        )
+
+    def apply_activation_sparsity(self, x, sparsity_scale):
+        x_shape = x.shape
+        x_2d = x.view(-1, x_shape[-1])
+        if sparsity_scale is None:
+            raise ValueError("sparsity_scale is not set.")
+
+        metric = x_2d.abs().float() * sparsity_scale
+        mask = torch.zeros_like(metric, dtype=torch.bool)
+        for ii in range(0, metric.shape[1], self.act_sparsity_m):
+            group_size = min(self.act_sparsity_m, metric.shape[1] - ii)
+            if group_size < self.act_sparsity_n:
+                continue
+            tmp = metric[:, ii: ii + group_size]
+            idx = torch.topk(tmp, self.act_sparsity_n, dim=1, largest=False)[1]
+            mask.scatter_(1, ii + idx, True)
+
+        x_2d = x_2d.masked_fill(mask, 0)
+        return x_2d.view(x_shape)
+
+    def _maybe_sparse(self, x, sparsity_scale):
+        if (
+            self.act_sparsity_n
+            and self.act_sparsity_m
+            and self.act_sparsity_location == "pre_trans"
+        ):
+            if sparsity_scale is None:
+                raise ValueError("sparsity_scale is not set.")
+            return self.apply_activation_sparsity(x, sparsity_scale)
+        return x
+
     def _trans_forward_after_ln(self, hidden_states):
+        hidden_states = self._maybe_sparse(hidden_states, self.q_proj.sparsity_scale)
         if self.ln_trans is not None:
             hidden_states = self.ln_trans(hidden_states)
         query_states = self.q_proj(hidden_states, qa_trans=self.ln_trans)
@@ -255,6 +395,7 @@ class FlatQuantLlamaAttention(LlamaAttention):
             attn_output = self.o_proj._ori_forward(attn_output)
         else:
             # new foward: 
+            attn_output = self._maybe_sparse(attn_output, self.o_proj.sparsity_scale)
             if self.o_trans is None and self.vcache_trans is not None:
                 # attn_output = self.vcache_trans(value_states)
                 init_shape = attn_output.shape

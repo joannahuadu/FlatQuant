@@ -43,6 +43,14 @@ def parser_gen():
                         help='Groupsize for activation quantization. Note that this should be the same as w_groupsize.')
     parser.add_argument('--a_asym', action="store_true", default=False,
                         help='Use asymmetric activation quantization.')
+    parser.add_argument('--act_sparsity', type=str, default=None,
+                        help='Activation N:M sparsity in form N:M (e.g., 2:4).')
+    parser.add_argument('--act_sparsity_location', type=str, default='pre_trans',
+                        help='Where to apply activation sparsity (pre_trans, pre_quant, post_quant).')
+    parser.add_argument('--target_modules', type=str, default=None,
+                        help='Comma-separated module name patterns to skip sparsity.')
+    parser.add_argument('--weight_scoring', action='store_true', default=False,
+                        help='Use weight-based scoring for activation sparsity.')
 
     # Weight Quantization Arguments
     parser.add_argument('--w_bits', type=int, default=16, 
@@ -132,6 +140,8 @@ def parser_gen():
         default=["piqa", "hellaswag", "arc_easy", "arc_challenge", "winogrande", "lambada_openai"],
         help='Tasks to evaluate on LM Eval.')
     parser.add_argument('--lm_eval_batch_size', type=int, default=128, help='Batch size for evaluation with lm eval harness.')
+    parser.add_argument('--num_fewshot', type=int, default=0, help='Number of few-shot examples for lm_eval.')
+    parser.add_argument('--output_file', type=str, default=None, help='Optional path to save lm_eval results as JSON.')
     parser.add_argument(
         "--distribute_model",
         action="store_true",
