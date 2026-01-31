@@ -168,6 +168,7 @@ def parser_gen():
         raise NotImplementedError
     
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    args.exp_name = f"{args.exp_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     args.quantize = (args.w_bits < 16) or (args.a_bits < 16) or (args.q_bits < 16) or (args.k_bits < 16) or (args.v_bits < 16)
     # # cache path
     # args.cache_dir = os.path.join(args.output_dir, ".cache")
