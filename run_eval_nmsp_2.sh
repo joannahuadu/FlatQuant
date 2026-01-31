@@ -34,7 +34,7 @@ nohup env CUDA_VISIBLE_DEVICES=1 python main.py \
   --lac \
   --cali_trans \
   --add_diag \
-  --output_dir ./outputs --save_matrix \
+  --output_dir ./outputs \
   --save_matrix \
   --lm_eval \
   --tasks mmlu arc_challenge \
@@ -58,7 +58,7 @@ nohup env CUDA_VISIBLE_DEVICES=1 python main.py \
   --lac \
   --cali_trans \
   --add_diag \
-  --output_dir ./outputs --save_matrix \
+  --output_dir ./outputs \
   --save_matrix \
   --lm_eval \
   --tasks mmlu arc_challenge \
