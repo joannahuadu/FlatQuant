@@ -29,8 +29,12 @@ def configure_act_sparsity(model, args, logger):
         module.weight_scoring = args.weight_scoring
         module.act_sparsity_location = args.act_sparsity_location
         module._init_sparsity_scale()
-        for submodule in module.modules():
+        for subname, submodule in module.named_modules():
             if isinstance(submodule, FlatQuantizedLinear):
+                subname = name + '.' + subname
+                if target_modules and any(pattern in subname for pattern in target_modules):
+                    logger.info(f"sparsity skipped: {subname}")
+                    continue
                 submodule.act_sparsity_n = act_sparsity_n
                 submodule.act_sparsity_m = act_sparsity_m
                 submodule.act_sparsity_location = args.act_sparsity_location
@@ -85,7 +89,7 @@ def main():
         model.to(utils.DEV)
     
     # Evaluating PPL
-    for eval_dataset in ["wikitext2", "c4"]:
+    for eval_dataset in ["wikitext2"]:
         logger.info(eval_dataset)
         testloader = data_utils.get_loaders(
                 args,
