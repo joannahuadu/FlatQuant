@@ -25,7 +25,7 @@ supported_models = [
             '/gemini/code/checkpoints/models--meta-llama--Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b'
             ]
 supported_datasets = ['wikitext2', 'c4', 'pile']
-supported_eigen_datasets =["wikitext2", "arc", "mathqa", "gsm8k", "mmlu"]
+supported_eigen_datasets =["wikitext2", "arc", "mathqa", "gsm8k", "mmlu", "openbookqa", "winogrande"]
 
 
 def parser_gen():
