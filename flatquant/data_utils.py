@@ -90,6 +90,58 @@ def get_pile(nsamples, seqlen, tokenizer):
     return trainloader
 
 
+def _format_openbookqa_example(example):
+    choices = example["choices"]["text"]
+    labels = example["choices"]["label"]
+    choice_map = {label.strip(): text for label, text in zip(labels, choices)}
+    answer_label = example["answerKey"].strip()
+    answer_text = choice_map.get(answer_label, "")
+    choices_str = " ".join([f"{label}) {text}" for label, text in zip(labels, choices)])
+    return f"Question: {example['question_stem']} Choices: {choices_str} Answer: {answer_text}"
+
+
+def get_openbookqa(nsamples, seqlen, tokenizer, eval_mode=False):
+    split = "test" if eval_mode else "train"
+    data = datasets.load_dataset("openbookqa", "main", split=split)
+    texts = [_format_openbookqa_example(ex) for ex in data]
+    enc = tokenizer("\n\n".join(texts), return_tensors="pt")
+    if eval_mode:
+        return enc
+    trainloader = []
+    for _ in range(nsamples):
+        i = random.randint(0, enc.input_ids.shape[1] - seqlen - 1)
+        j = i + seqlen
+        inp = enc.input_ids[:, i:j]
+        tar = inp.clone()
+        tar[:, :-1] = -100
+        trainloader.append((inp, tar))
+    return trainloader
+
+
+def _format_winogrande_example(example):
+    answer = example["answer"].strip()
+    option = example["option1"] if answer == "1" else example["option2"]
+    return example["sentence"].replace("_", option)
+
+
+def get_winogrande(nsamples, seqlen, tokenizer, eval_mode=False):
+    split = "validation" if eval_mode else "train"
+    data = datasets.load_dataset("winogrande", "winogrande_xl", split=split)
+    texts = [_format_winogrande_example(ex) for ex in data]
+    enc = tokenizer("\n\n".join(texts), return_tensors="pt")
+    if eval_mode:
+        return enc
+    trainloader = []
+    for _ in range(nsamples):
+        i = random.randint(0, enc.input_ids.shape[1] - seqlen - 1)
+        j = i + seqlen
+        inp = enc.input_ids[:, i:j]
+        tar = inp.clone()
+        tar[:, :-1] = -100
+        trainloader.append((inp, tar))
+    return trainloader
+
+
 def get_loaders(
     args, name, tokenizer, nsamples=128, seqlen=2048, eval_mode=False
 ):
@@ -101,6 +153,10 @@ def get_loaders(
         dataset = get_c4_new(nsamples, seqlen, tokenizer, eval_mode)
     elif 'pile' in name:
         dataset = get_pile(nsamples, seqlen, tokenizer)
+    elif 'openbookqa' in name:
+        dataset = get_openbookqa(nsamples, seqlen, tokenizer, eval_mode)
+    elif 'winogrande' in name:
+        dataset = get_winogrande(nsamples, seqlen, tokenizer, eval_mode)
 
     if 'c4' in name and eval_mode:
         dataset = dataset.input_ids
