@@ -90,6 +90,7 @@ def load_flat_matrices(args, model, path=None):
         layers[i].self_attn.rep_matrix_only()
         layers[i].mlp.rep_matrix_only()
         layers[i].load_state_dict(flat_param, strict=False)
+        print(f"Loading flat_matrices for layer {i}..")
     return model
 
 
