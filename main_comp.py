@@ -279,7 +279,7 @@ def main():
                 nsamples=args.eigen_nsamples, seqlen=model.seqlen, eval_mode=False,
             )
             print("Print compressed_weights and original weights...")
-            for k, v in compressed_weights:
+            for k, v in compressed_weights.items():
                 print(k, v.max(), v.min())
                 para = model.state_dict()[k]
                 print(para.max(), para.min())
