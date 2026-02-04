@@ -18,14 +18,15 @@ for i in "${target_layers[@]}"; do
     config+=",layers.${i}.self_attn.q_proj,layers.${i}.mlp.gate_proj"
 done
 
-nohup env CUDA_VISIBLE_DEVICES=0 python main.py \
+nohup env CUDA_VISIBLE_DEVICES=3 python main.py \
   --model "$MODEL_PATH" \
   --w_bits 4 \
   --a_bits 4 \
   --gptq \
   --act_sparsity 2:4 \
-  --act_sparsity_location post_quant \
+  --act_sparsity_location pre_quant \
   --target_modules "${config}" \
+  --weight_scoring \
   --cali_bsz 4 \
   --epoch 15 \
   --flat_lr 5e-3 \
@@ -36,20 +37,25 @@ nohup env CUDA_VISIBLE_DEVICES=0 python main.py \
   --output_dir ./outputs \
   --save_matrix \
   --lm_eval \
-  --tasks winogrande openbookqa \
+  --tasks mmlu arc_challenge \
   --lm_eval_batch_size 16 \
-  >> "$LOG_DIR/eval_w4a4_NMSP_3_skip_wg_obqa.log" 2>&1 &
+  --eigen_compensation \
+  --eigen_dataset mmlu \
+  --eigen_nsamples 64 \
+  --eigen_r 128 \
+  >> "$LOG_DIR/eval_w4a4_NMSP_2_skip_eora_mmlu_1.log" 2>&1 &
 
 sleep 30
 
-nohup env CUDA_VISIBLE_DEVICES=0 python main.py \
+nohup env CUDA_VISIBLE_DEVICES=3 python main.py \
   --model "$MODEL_PATH" \
   --w_bits 8 \
   --a_bits 8 \
   --gptq \
   --act_sparsity 2:4 \
-  --act_sparsity_location post_quant \
+  --act_sparsity_location pre_quant \
   --target_modules "${config}" \
+  --weight_scoring \
   --cali_bsz 4 \
   --epoch 15 \
   --flat_lr 5e-4 \
@@ -60,6 +66,40 @@ nohup env CUDA_VISIBLE_DEVICES=0 python main.py \
   --output_dir ./outputs \
   --save_matrix \
   --lm_eval \
-  --tasks winogrande openbookqa \
+  --tasks mmlu arc_challenge \
   --lm_eval_batch_size 16 \
-  >> "$LOG_DIR/eval_w8a8_NMSP_3_skip_wg_obqa.log" 2>&1 &
+  --eigen_compensation \
+  --eigen_dataset mmlu \
+  --eigen_nsamples 64 \
+  --eigen_r 128 \
+  >> "$LOG_DIR/eval_w8a8_NMSP_2_skip_eora_mmlu_1.log" 2>&1 &
+
+sleep 30
+
+nohup env CUDA_VISIBLE_DEVICES=0 python main.py \
+  --model "$MODEL_PATH" \
+  --w_bits 4 \
+  --a_bits 4 \
+  --gptq \
+  --act_sparsity 2:4 \
+  --act_sparsity_location pre_quant \
+  --target_modules "${config}" \
+  --weight_scoring \
+  --cali_bsz 4 \
+  --epoch 15 \
+  --flat_lr 5e-3 \
+  --lwc \
+  --lac \
+  --cali_trans \
+  --add_diag \
+  --output_dir ./outputs \
+  --save_matrix \
+  --lm_eval \
+  --tasks mmlu arc_challenge \
+  --lm_eval_batch_size 16 \
+  --eigen_compensation \
+  --eigen_dataset arc \
+  --eigen_nsamples 64 \
+  --eigen_r 128 \
+  >> "$LOG_DIR/eval_w4a4_NMSP_2_skip_eora_arc_1.log" 2>&1 &
+  

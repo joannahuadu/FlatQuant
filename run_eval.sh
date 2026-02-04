@@ -19,10 +19,10 @@ nohup env CUDA_VISIBLE_DEVICES=0 python main.py \
   --lac \
   --cali_trans \
   --add_diag \
-  --output_dir ./outputs --save_matrix \
+  --output_dir ./outputs \
   --save_matrix \
   --lm_eval \
-  --tasks mmlu arc_challenge \
+  --tasks winogrande openbookqa \
   --lm_eval_batch_size 16 \
   >> "$LOG_DIR/eval_w4a4.log" 2>&1 &
 
@@ -39,10 +39,10 @@ nohup env CUDA_VISIBLE_DEVICES=1 python main.py \
   --lac \
   --cali_trans \
   --add_diag \
-  --output_dir ./outputs --save_matrix \
+  --output_dir ./outputs \
   --save_matrix \
   --lm_eval \
-  --tasks mmlu arc_challenge \
+  --tasks winogrande openbookqa \
   --lm_eval_batch_size 16 \
   >> "$LOG_DIR/eval_w8a8.log" 2>&1 &
 
@@ -59,9 +59,9 @@ nohup env CUDA_VISIBLE_DEVICES=1 python main.py \
   --lac \
   --cali_trans \
   --add_diag \
-  --output_dir ./outputs --save_matrix \
+  --output_dir ./outputs \
   --save_matrix \
   --lm_eval \
-  --tasks mmlu arc_challenge \
+  --tasks winogrande openbookqa \
   --lm_eval_batch_size 16 \
   >> "$LOG_DIR/eval_bf16.log" 2>&1 &
