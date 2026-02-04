@@ -107,6 +107,23 @@ def parser_gen():
                         help="Use the inverse method in PyTorch to directly get the inverse matrix rather than SVD.")
     parser.add_argument("--separate_vtrans", default=False, action="store_true", 
                         help="Disable the integration of the vtrans transformation.")
+    parser.add_argument("--dim_right", type=int, default=None,
+                        help="Fix the right dimension for decomposition; "
+                             "left dim is inferred as in_features / dim_right.")
+    parser.add_argument("--dim2_matrix_path", type=str, default=None,
+                        help="Path to dim_right=2 flat_matrices.pth for right-matrix alignment.")
+    parser.add_argument("--dim2_loss_weight", type=float, default=0.0,
+                        help="Weight for aligning dim_right=4 right-matrix main block to dim_right=2.")
+    parser.add_argument("--soft_perm", action="store_true", default=False,
+                        help="Use learnable soft permutation for dim_right alignment (Sinkhorn).")
+    parser.add_argument("--soft_perm_temp", type=float, default=0.5,
+                        help="Temperature for Sinkhorn soft permutation.")
+    parser.add_argument("--soft_perm_iters", type=int, default=10,
+                        help="Number of Sinkhorn iterations.")
+    parser.add_argument("--soft_perm_reg", type=float, default=0.0,
+                        help="Regularization weight to encourage near-permutation.")
+    parser.add_argument("--comp_zero_weight", type=float, default=0.0,
+                        help="Weight for forcing complement-space outputs into quantization zero-zone.")
     
     # KV-Cache Quantization Arguments
     parser.add_argument('--q_bits', type=int, default=16,

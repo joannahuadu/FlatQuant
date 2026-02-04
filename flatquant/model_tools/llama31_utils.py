@@ -9,7 +9,7 @@ from flatquant.function_utils import get_init_scale, get_decompose_dim
 from flatquant.trans_utils import SVDSingleTransMatrix, SVDDecomposeTransMatrix
 from flatquant.trans_utils import InvSingleTransMatrix, InvDecomposeTransMatrix
 from flatquant.flat_linear import FlatQuantizedLinear
-
+from tqdm import tqdm
 from transformers.models.llama.modeling_llama import LlamaMLP, LlamaAttention, \
                                                      apply_rotary_pos_emb, repeat_kv
 
@@ -83,9 +83,29 @@ class FlatQuantLlamaMLP(LlamaMLP):
         else:
             DecomposeTransMatrix = SVDDecomposeTransMatrix
         if self.args.w_bits < 16 or self.args.a_bits < 16:
-            up_dim_left, up_dim_right = get_decompose_dim(self.up_proj.linear.weight.shape[1])
+            if self.args.dim_right is not None and self.args.dim_right > 0:
+                up_dim_right = self.args.dim_right
+                up_in_dim = self.up_proj.linear.weight.shape[1]
+                if up_in_dim % up_dim_right != 0:
+                    raise ValueError(
+                        "dim_right must divide up_proj input dim "
+                        f"(got in_dim={up_in_dim}, dim_right={up_dim_right})."
+                    )
+                up_dim_left = up_in_dim // up_dim_right
+            else:
+                up_dim_left, up_dim_right = get_decompose_dim(self.up_proj.linear.weight.shape[1])
             self.up_gate_trans = DecomposeTransMatrix(up_dim_left, up_dim_right, add_diag=self.args.add_diag)
-            down_dim_left, down_dim_right = get_decompose_dim(self.down_proj.linear.weight.shape[1])
+            if self.args.dim_right is not None and self.args.dim_right > 0:
+                down_dim_right = self.args.dim_right
+                down_in_dim = self.down_proj.linear.weight.shape[1]
+                if down_in_dim % down_dim_right != 0:
+                    raise ValueError(
+                        "dim_right must divide down_proj input dim "
+                        f"(got in_dim={down_in_dim}, dim_right={down_dim_right})."
+                    )
+                down_dim_left = down_in_dim // down_dim_right
+            else:
+                down_dim_left, down_dim_right = get_decompose_dim(self.down_proj.linear.weight.shape[1])
             self.down_trans = DecomposeTransMatrix(down_dim_left, down_dim_right, add_diag=self.args.add_diag)
         else:
             self.up_gate_trans, self.down_trans = None, None
@@ -236,7 +256,17 @@ class FlatQuantLlamaAttention(LlamaAttention):
         else:
             SingleTransMatrix, DecomposeTransMatrix = SVDSingleTransMatrix, SVDDecomposeTransMatrix
         if self.args.w_bits < 16 or self.args.a_bits < 16:
-            ln_dim_left, ln_dim_right = get_decompose_dim(self.q_proj.linear.weight.shape[1])
+            if self.args.dim_right is not None and self.args.dim_right > 0:
+                ln_dim_right = self.args.dim_right
+                in_dim = self.q_proj.linear.weight.shape[1]
+                if in_dim % ln_dim_right != 0:
+                    raise ValueError(
+                        "dim_right must divide q_proj input dim "
+                        f"(got in_dim={in_dim}, dim_right={ln_dim_right})."
+                    )
+                ln_dim_left = in_dim // ln_dim_right
+            else:
+                ln_dim_left, ln_dim_right = get_decompose_dim(self.q_proj.linear.weight.shape[1])
             self.ln_trans = DecomposeTransMatrix(ln_dim_left, ln_dim_right, add_diag=self.args.add_diag)
             self.o_trans = SingleTransMatrix(self.config.num_attention_heads)
         else:
@@ -460,7 +490,7 @@ class FlatQuantLlamaAttention(LlamaAttention):
 def apply_flatquant_to_llama_31(args, model):
     skip_initialization()
     # Replace module with FlatQuant version
-    for layer in range(model.config.num_hidden_layers):
+    for layer in tqdm(range(model.config.num_hidden_layers)):
         # attn
         model.model.layers[layer].self_attn = FlatQuantLlamaAttention(args, model.model.layers[layer].self_attn)
         # mlp
