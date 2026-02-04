@@ -8,17 +8,17 @@ mkdir -p "$LOG_DIR"
 TS="$(date +%Y%m%d_%H%M%S)"
 
 # Base target modules
-base_targets=("lm_head" "up_proj" "k_proj" "v_proj" "o_proj" "q_proj" "gate_proj")
+base_targets=("lm_head" "up_proj" "k_proj" "v_proj" "o_proj")
 
 # Only include q_proj and gate_proj for these layers
-# target_layers=(19 21 28 30 31)
+target_layers=(19 21 28 30 31)
 
 config=$(IFS=,; echo "${base_targets[*]}")
-# for i in "${target_layers[@]}"; do
-#     config+=",layers.${i}.self_attn.q_proj,layers.${i}.mlp.gate_proj"
-# done
+for i in "${target_layers[@]}"; do
+    config+=",layers.${i}.self_attn.q_proj,layers.${i}.mlp.gate_proj"
+done
 
-nohup env CUDA_VISIBLE_DEVICES=1 python main.py \
+nohup env CUDA_VISIBLE_DEVICES=0 python main.py \
   --model "$MODEL_PATH" \
   --w_bits 4 \
   --a_bits 4 \
@@ -36,12 +36,13 @@ nohup env CUDA_VISIBLE_DEVICES=1 python main.py \
   --output_dir ./outputs \
   --save_matrix \
   --lm_eval \
-  --tasks mmlu arc_challenge \
+  --tasks winogrande openbookqa mmlu arc_challenge \
   --lm_eval_batch_size 16 \
-  >> "$LOG_DIR/eval_w4a4_NMSP_2_skip.log" 2>&1 &
+  >> "$LOG_DIR/eval_w4a4_NMSP_2_skip_0204.log" 2>&1 &
 
+sleep 30
 
-nohup env CUDA_VISIBLE_DEVICES=1 python main.py \
+nohup env CUDA_VISIBLE_DEVICES=0 python main.py \
   --model "$MODEL_PATH" \
   --w_bits 8 \
   --a_bits 8 \
@@ -59,6 +60,6 @@ nohup env CUDA_VISIBLE_DEVICES=1 python main.py \
   --output_dir ./outputs \
   --save_matrix \
   --lm_eval \
-  --tasks mmlu arc_challenge \
+  --tasks winogrande openbookqa mmlu arc_challenge \
   --lm_eval_batch_size 16 \
-  >> "$LOG_DIR/eval_w8a8_NMSP_2_skip.log" 2>&1 &
+  >> "$LOG_DIR/eval_w8a8_NMSP_2_skip_0204.log" 2>&1 &

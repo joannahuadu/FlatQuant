@@ -278,6 +278,12 @@ def main():
                 args, args.eigen_dataset, tokenizer,
                 nsamples=args.eigen_nsamples, seqlen=model.seqlen, eval_mode=False,
             )
+            print("Print compressed_weights and original weights...")
+            for k, v in compressed_weights:
+                print(k, v.max(), v.min())
+                para = model.state_dict()[k]
+                print(para.max(), para.min())
+                break
             llama_sequential_eigen(model, eigenloader, compressed_weights, utils.DEV, args)
 
     if args.distribute_model:
