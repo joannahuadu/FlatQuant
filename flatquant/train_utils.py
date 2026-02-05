@@ -258,6 +258,35 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             scheduler = torch.optim.lr_scheduler.ChainedScheduler([scheduler_warmup, scheduler_main])
         else:
             scheduler = scheduler_main
+        # cache hidden states right before each trans
+        pre_trans_cache = {}
+        hooks = []
+
+        def _cache_input(name):
+            def _hook(_mod, inp):
+                if inp:
+                    pre_trans_cache[name] = inp[0]
+            return _hook
+
+        if layer.self_attn.ln_trans is not None:
+            hooks.append(
+                layer.self_attn.ln_trans.register_forward_pre_hook(
+                    _cache_input("self_attn.ln_trans")
+                )
+            )
+        if layer.mlp.up_gate_trans is not None:
+            hooks.append(
+                layer.mlp.up_gate_trans.register_forward_pre_hook(
+                    _cache_input("mlp.up_gate_trans")
+                )
+            )
+        if layer.mlp.down_trans is not None:
+            hooks.append(
+                layer.mlp.down_trans.register_forward_pre_hook(
+                    _cache_input("mlp.down_trans")
+                )
+            )
+
         # check_params_grad(layer)
         # set_quantizer_state(layer, False)
         for epoch in range(args.epochs):
@@ -266,6 +295,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             with traincast():
                 for j in range(args.nsamples // args.cali_bsz):
                     index = j * args.cali_bsz
+                    pre_trans_cache.clear()
                     quant_out = layer(fp_inps[index:index+args.cali_bsz,], attention_mask=attention_mask_batch, position_ids=position_ids)[0]
                     loss = loss_func(fp_outs[index:index+args.cali_bsz,], quant_out)
                     if target_layer is not None and args.dim2_loss_weight > 0:
@@ -349,7 +379,10 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                 b_perm = cur_right[best_perm][:, best_perm] if best_perm is not None else None
                             if b_perm is None:
                                 continue
-                            x_t = fp_inps[index:index+args.cali_bsz]
+                            x_t = pre_trans_cache.get(name, None)
+                            if x_t is None:
+                                continue
+                            x_t = x_t.detach()
                             x_prime = kronecker_matmul(x_t, cur_left.to(x_t), b_perm.to(x_t))
                             if name == "self_attn.ln_trans":
                                 quantizer = layer.self_attn.q_proj.act_quantizer
@@ -375,6 +408,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     scheduler.step()
             cur_lr = optimizer.state_dict()['param_groups'][0]['lr']
             logger.info(f"layer {i} lwc lac iter {epoch}, lr {cur_lr:.8f}  time {time.time() - start_tick:.6f}s, mse: {mse:.8f}" )
+
+        for h in hooks:
+            h.remove()
 
         fp_inps, fp_outs = fp_outs, fp_inps
         layers[i] = layer.to("cpu")
