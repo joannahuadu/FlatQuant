@@ -71,4 +71,3 @@ nohup env CUDA_VISIBLE_DEVICES=2 python main_comp.py \
   --eigen_nsamples 64 \
   --eigen_r 128 \
   >> "$LOG_DIR/eval_w8a8_NMSP_3_skip_eora_wg_0204.log" 2>&1 &
-  
