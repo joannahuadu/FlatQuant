@@ -124,6 +124,8 @@ def parser_gen():
                         help="Regularization weight to encourage near-permutation.")
     parser.add_argument("--comp_zero_weight", type=float, default=0.0,
                         help="Weight for forcing complement-space outputs into quantization zero-zone.")
+    parser.add_argument("--comp_tau_alpha", type=float, default=1.0,
+                        help="Scale factor for tau in complement-space loss (1.0 keeps original).")
     
     # KV-Cache Quantization Arguments
     parser.add_argument('--q_bits', type=int, default=16,

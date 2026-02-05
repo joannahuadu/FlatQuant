@@ -397,6 +397,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                             tau_reshaped = tau.view(*tau.shape[:-1], cur_left.shape[0], cur_right.shape[0])
                             comp = x_prime_reshaped[..., :, 2:4]
                             tau_comp = tau_reshaped[..., :, 2:4]
+                            tau_comp = tau_comp * args.comp_tau_alpha
                             comp_loss = comp_loss + torch.mean(torch.relu(comp.abs() - tau_comp) ** 2)
                         if comp_loss != 0.0:
                             loss = loss + args.comp_zero_weight * comp_loss
@@ -429,4 +430,3 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     torch.cuda.empty_cache()
     model.config.use_cache = use_cache
     return model
-
