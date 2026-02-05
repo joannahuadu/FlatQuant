@@ -188,7 +188,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     loss_func = torch.nn.MSELoss()
     target_right_by_layer = None
     if args.dim_right == 4 and args.dim2_matrix_path and args.dim2_loss_weight > 0:
-        target_right_by_layer = torch.load(args.dim2_matrix_path, map_location="cpu")
+        target_right_by_layer = torch.load(args.dim2_matrix_path, map_location=dev)
     # start training
     flat_parameters = {}
     num_train_layer = len(layers)
@@ -235,7 +235,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         perm_logits = {}
         if args.soft_perm and target_layer is not None:
             for name in ("self_attn.ln_trans", "mlp.up_gate_trans", "mlp.down_trans"):
-                perm_logits[name] = nn.Parameter(torch.zeros(4, 4, device=dev, dtype=torch.float32))
+                perm_logits[name] = nn.Parameter(torch.randn(4, 4, device=dev, dtype=torch.float32) * 0.01)
             perm_logits_by_layer[i] = perm_logits
             trained_params.append({"params": list(perm_logits.values()), "lr": args.flat_lr})
         if args.cali_trans:
@@ -275,18 +275,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                             ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
                             ("mlp.down_trans", layer.mlp.down_trans),
                         ):
-                            if trans is None:
-                                continue
                             target_right = _find_target_matrix_right(target_layer, name)
-                            if target_right is None:
-                                continue
                             cur_right = _get_right_matrix(trans)
-                            if cur_right is None:
-                                continue
-                            if cur_right.shape == target_right.shape:
-                                cur_block = cur_right
-                                tgt_block = target_right
-                            elif cur_right.shape == (4, 4) and target_right.shape == (2, 2):
+                            if cur_right.shape == (4, 4) and target_right.shape == (2, 2):
                                 if args.soft_perm and name in perm_logits:
                                     cur_block, p_soft = _soft_perm_main_block(
                                         cur_right, perm_logits[name], temp=args.soft_perm_temp, n_iters=args.soft_perm_iters

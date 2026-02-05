@@ -118,7 +118,7 @@ def main():
 
     perm_logits = None
     if args.soft_perm:
-        perm_logits = torch.nn.Parameter(torch.zeros(4, 4, device=device, dtype=torch.float32))
+        perm_logits = torch.nn.Parameter(torch.randn(4, 4, device=device, dtype=torch.float32) * 0.01)
         opt = torch.optim.AdamW(list(trans4.parameters()) + [perm_logits], lr=args.lr)
 
     act_quant = ActivationQuantizer(bits=args.a_bits, sym=args.a_sym)

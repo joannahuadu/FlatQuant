@@ -281,7 +281,7 @@ def main():
             print("Print compressed_weights and original weights...")
             for k, v in compressed_weights.items():
                 print(k, v.max(), v.min())
-                para = model.state_dict()[k]
+                para = model.state_dict()[k+'.weight']
                 print(para.max(), para.min())
                 break
             llama_sequential_eigen(model, eigenloader, compressed_weights, utils.DEV, args)
