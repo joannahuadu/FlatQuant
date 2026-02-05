@@ -264,7 +264,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
 
         def _cache_input(name):
             def _hook(_mod, inp):
-                if inp:
+                if inp and name not in pre_trans_cache:
                     pre_trans_cache[name] = inp[0]
             return _hook
 
