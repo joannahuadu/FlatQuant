@@ -81,6 +81,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--align_weight", type=float, default=1.0)
     parser.add_argument("--comp_zero_weight", type=float, default=0.0)
+    parser.add_argument("--comp_tau_alpha", type=float, default=1.0)
     parser.add_argument("--a_bits", type=int, default=4)
     parser.add_argument("--a_sym", action="store_true", default=True)
     parser.add_argument("--soft_perm", action="store_true", default=False)
@@ -156,6 +157,7 @@ def main():
             tau_reshaped = tau.view(*tau.shape[:-1], cur_left.shape[0], cur_right.shape[0])
             comp = x_prime_reshaped[..., :, 2:4]
             tau_comp = tau_reshaped[..., :, 2:4]
+            tau_comp = tau_comp * args.comp_tau_alpha
             loss = loss + args.comp_zero_weight * torch.mean(torch.relu(comp.abs() - tau_comp) ** 2)
         opt.zero_grad()
         loss.backward()
