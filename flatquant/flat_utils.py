@@ -30,6 +30,13 @@ def reparameterize_ln(ln, trans):
 def reparameterize_model(model):
     for idx in range(model.config.num_hidden_layers):
         layer = model.model.layers[idx]
+        # enable soft permutation if present
+        if layer.self_attn.ln_trans is not None:
+            layer.self_attn.ln_trans.use_perm = True
+        if layer.mlp.up_gate_trans is not None:
+            layer.mlp.up_gate_trans.use_perm = True
+        if layer.mlp.down_trans is not None:
+            layer.mlp.down_trans.use_perm = True
         layer.self_attn.reparameterize()
         layer.mlp.reparameterize()
         # fuse per-channel scaling to layernorm
@@ -68,7 +75,7 @@ def save_flat_matrices(args, model, rank=None):
         layer = model.model.layers[i]
         layer.self_attn.rep_matrix_only()
         layer.mlp.rep_matrix_only()
-        paras_name = ["trans.matrix", "trans.diag_scale", "clip_factor_w", "clip_factor_a"]
+        paras_name = ["trans.matrix", "trans.diag_scale", "trans.perm_logits", "clip_factor_w", "clip_factor_a"]
         flat_matrices[i] = get_paras_dict_by_name(layer, required_names=paras_name)
     if rank is not None:
         matrices_path = os.path.join(args.exp_dir, f"flat_matrices_{rank}.pth")

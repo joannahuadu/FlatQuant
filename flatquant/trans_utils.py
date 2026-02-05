@@ -4,6 +4,15 @@ import torch.nn as nn
 from flatquant.flat_utils import kronecker_matmul
 from flatquant.function_utils import get_init_weight, get_inverse
 
+# ---------- soft permutation (sinkhorn) ----------
+def _sinkhorn(logits, n_iters=10):
+    log_p = logits
+    for _ in range(n_iters):
+        log_p = log_p - torch.logsumexp(log_p, dim=-1, keepdim=True)
+        log_p = log_p - torch.logsumexp(log_p, dim=-2, keepdim=True)
+    return torch.softmax(log_p, dim=-1)
+
+
 # ---------- transformation version of singular value decomposition ----------
 class SVDSingleTransMatrix(nn.Module):
     def __init__(self, size):
@@ -73,6 +82,12 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.linear_v_right = nn.utils.parametrizations.orthogonal(self.linear_v_right, orthogonal_map="cayley", use_trivialization=False)
         self.linear_diag_right = torch.nn.Parameter(torch.ones(right_size, dtype=torch.float32), requires_grad=True)
 
+        # soft permutation for right matrix
+        self.perm_logits = nn.Parameter(torch.randn(4, 4, device=dev, dtype=torch.float32) * 0.01, requires_grad=True)
+        self.perm_temp = 0.5
+        self.perm_iters = 10
+        self.use_perm = False
+
         self.add_diag = add_diag
         self.use_diag = True
         if self.add_diag:
@@ -98,9 +113,20 @@ class SVDDecomposeTransMatrix(nn.Module):
             matrix_left, matrix_right = self.matrix_left, self.matrix_right
             if inv_t:
                 matrix_left, matrix_right = self.matrix_left_inv, self.matrix_right_inv
+            matrix_right = self._apply_right_perm(matrix_right)
             return kronecker_matmul(inp, matrix_left.to(inp), matrix_right.to(inp))
         matrix_left, matrix_right = matrix_u_left @ torch.diag(linear_diag_left) @ matrix_v_left.t(), matrix_u_right @ torch.diag(linear_diag_right) @ matrix_v_right.t()
+        matrix_right = self._apply_right_perm(matrix_right)
         return kronecker_matmul(inp, matrix_left.to(inp), matrix_right.to(inp))
+
+    def _apply_right_perm(self, matrix_right):
+        if not self.use_perm or self.perm_logits is None:
+            return matrix_right
+        if self.perm_logits.shape != matrix_right.shape:
+            return matrix_right
+        perm_logits = self.perm_logits.to(matrix_right)
+        p_soft = _sinkhorn(perm_logits / self.perm_temp, n_iters=self.perm_iters)
+        return p_soft.transpose(-1, -2) @ matrix_right @ p_soft
 
     def to_eval_mode(self):
         if not self._eval_mode:
@@ -178,6 +204,12 @@ class InvDecomposeTransMatrix(nn.Module):
         linear_right.weight.data = get_init_weight(right_size).to(linear_right.weight)
         self.linear_right = linear_right
 
+        # soft permutation for right matrix
+        self.perm_logits = nn.Parameter(torch.randn(4, 4, device=dev, dtype=torch.float32) * 0.01, requires_grad=True)
+        self.perm_temp = 0.01
+        self.perm_iters = 10
+        self.use_perm = False
+
         self.add_diag = add_diag
         self.use_diag = True
         if self.add_diag:
@@ -201,7 +233,17 @@ class InvDecomposeTransMatrix(nn.Module):
             matrix_left, matrix_right = self.matrix_left, self.matrix_right
             if inv_t:
                 matrix_left, matrix_right = self.matrix_left_inv, self.matrix_right_inv
+        matrix_right = self._apply_right_perm(matrix_right)
         return kronecker_matmul(inp, matrix_left.to(inp), matrix_right.to(inp))
+
+    def _apply_right_perm(self, matrix_right):
+        if not self.use_perm or self.perm_logits is None:
+            return matrix_right
+        if self.perm_logits.shape != matrix_right.shape:
+            return matrix_right
+        perm_logits = self.perm_logits.to(matrix_right)
+        p_soft = _sinkhorn(perm_logits / self.perm_temp, n_iters=self.perm_iters)
+        return p_soft.transpose(-1, -2) @ matrix_right @ p_soft
 
     def to_eval_mode(self):
         if not self._eval_mode:

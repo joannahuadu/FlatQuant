@@ -234,10 +234,14 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         trained_params, paras_name = [], []
         perm_logits = {}
         if args.soft_perm and target_layer is not None:
-            for name in ("self_attn.ln_trans", "mlp.up_gate_trans", "mlp.down_trans"):
-                perm_logits[name] = nn.Parameter(torch.randn(4, 4, device=dev, dtype=torch.float32) * 0.01)
+            for name, trans in (
+                ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                ("mlp.down_trans", layer.mlp.down_trans),
+            ):
+                perm_logits[name] = trans.perm_logits
             perm_logits_by_layer[i] = perm_logits
-            trained_params.append({"params": list(perm_logits.values()), "lr": args.flat_lr})
+            trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.perm_logits", ]), "lr": args.flat_lr})
         if args.cali_trans:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.linear", ]), "lr": args.flat_lr})
             paras_name.append("trans.linear")
@@ -310,7 +314,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                             if cur_right.shape == (4, 4) and target_right.shape == (2, 2):
                                 if args.soft_perm and name in perm_logits:
                                     cur_block, p_soft = _soft_perm_main_block(
-                                        cur_right, perm_logits[name], temp=args.soft_perm_temp, n_iters=args.soft_perm_iters
+                                        cur_right, perm_logits[name], temp=trans.perm_temp, n_iters=trans.perm_iters
                                     )
                                     if args.soft_perm_reg > 0:
                                         reg = (p_soft * (1.0 - p_soft)).mean()
@@ -359,7 +363,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                 continue
                             if args.soft_perm and name in perm_logits:
                                 p_soft = _sinkhorn(
-                                    perm_logits[name] / args.soft_perm_temp, n_iters=args.soft_perm_iters
+                                    perm_logits[name] / trans.perm_temp, n_iters=trans.perm_iters
                                 )
                                 b_perm = p_soft.transpose(-1, -2) @ cur_right @ p_soft
                             else:
