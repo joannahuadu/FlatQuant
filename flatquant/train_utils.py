@@ -242,6 +242,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 perm_logits[name] = trans.perm_logits
             perm_logits_by_layer[i] = perm_logits
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.perm_logits", ]), "lr": args.flat_lr})
+            paras_name.append("trans.perm_logits")
         if args.cali_trans:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.linear", ]), "lr": args.flat_lr})
             paras_name.append("trans.linear")

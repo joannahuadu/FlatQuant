@@ -83,7 +83,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.linear_diag_right = torch.nn.Parameter(torch.ones(right_size, dtype=torch.float32), requires_grad=True)
 
         # soft permutation for right matrix
-        self.perm_logits = nn.Parameter(torch.randn(4, 4, device=dev, dtype=torch.float32) * 0.01, requires_grad=True)
+        self.perm_logits = nn.Parameter(torch.randn(4, 4, dtype=torch.float32) * 0.01, requires_grad=True)
         self.perm_temp = 0.5
         self.perm_iters = 10
         self.use_perm = False
@@ -116,7 +116,7 @@ class SVDDecomposeTransMatrix(nn.Module):
             matrix_right = self._apply_right_perm(matrix_right)
             return kronecker_matmul(inp, matrix_left.to(inp), matrix_right.to(inp))
         matrix_left, matrix_right = matrix_u_left @ torch.diag(linear_diag_left) @ matrix_v_left.t(), matrix_u_right @ torch.diag(linear_diag_right) @ matrix_v_right.t()
-        matrix_right = self._apply_right_perm(matrix_right)
+        # matrix_right = self._apply_right_perm(matrix_right)
         return kronecker_matmul(inp, matrix_left.to(inp), matrix_right.to(inp))
 
     def _apply_right_perm(self, matrix_right):
@@ -205,7 +205,7 @@ class InvDecomposeTransMatrix(nn.Module):
         self.linear_right = linear_right
 
         # soft permutation for right matrix
-        self.perm_logits = nn.Parameter(torch.randn(4, 4, device=dev, dtype=torch.float32) * 0.01, requires_grad=True)
+        self.perm_logits = nn.Parameter(torch.randn(4, 4, dtype=torch.float32) * 0.01, requires_grad=True)
         self.perm_temp = 0.01
         self.perm_iters = 10
         self.use_perm = False
@@ -229,11 +229,12 @@ class InvDecomposeTransMatrix(nn.Module):
             matrix_left, matrix_right = self.linear_left.weight, self.linear_right.weight
             if inv_t:
                 matrix_left, matrix_right = get_inverse(matrix_left).T, get_inverse(matrix_right).T
+            matrix_right = self._apply_right_perm(matrix_right)
         else:
             matrix_left, matrix_right = self.matrix_left, self.matrix_right
             if inv_t:
                 matrix_left, matrix_right = self.matrix_left_inv, self.matrix_right_inv
-        matrix_right = self._apply_right_perm(matrix_right)
+        # matrix_right = self._apply_right_perm(matrix_right)
         return kronecker_matmul(inp, matrix_left.to(inp), matrix_right.to(inp))
 
     def _apply_right_perm(self, matrix_right):
