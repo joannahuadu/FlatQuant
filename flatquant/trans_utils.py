@@ -83,9 +83,9 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.linear_diag_right = torch.nn.Parameter(torch.ones(right_size, dtype=torch.float32), requires_grad=True)
 
         # soft permutation for right matrix
-        self.perm_logits = nn.Parameter(torch.randn(4, 4, device=dev, dtype=torch.float32) * 0.01, requires_grad=True)
+        self.perm_logits = nn.Parameter(torch.randn(4, 4, dtype=torch.float32) * 0.01, requires_grad=True)
         # self.perm_logits = nn.Parameter(torch.eye(right_size, dtype=torch.float32) * 5.0, requires_grad=False)
-        self.perm_temp = 0.5
+        self.perm_temp = 0.01
         self.perm_iters = 10
         self.use_perm = False
         self.use_comp_mask = False
@@ -220,9 +220,9 @@ class InvDecomposeTransMatrix(nn.Module):
         self.linear_right = linear_right
 
         # soft permutation for right matrix
-        self.perm_logits = nn.Parameter(torch.randn(4, 4, device=dev, dtype=torch.float32) * 0.01, requires_grad=True)
+        self.perm_logits = nn.Parameter(torch.randn(4, 4, dtype=torch.float32) * 0.01, requires_grad=True)
         # self.perm_logits = nn.Parameter(torch.eye(right_size, dtype=torch.float32) * 5.0, requires_grad=False)
-        self.perm_temp = 0.5
+        self.perm_temp = 0.01
         self.perm_iters = 10
         self.use_perm = False
         self.use_comp_mask = False
