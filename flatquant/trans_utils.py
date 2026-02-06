@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from flatquant.flat_utils import kronecker_matmul
+from flatquant.flat_utils import kronecker_matmul, _kronecker_matmul_masked
 from flatquant.function_utils import get_init_weight, get_inverse
 
 # ---------- soft permutation (sinkhorn) ----------
@@ -84,9 +84,11 @@ class SVDDecomposeTransMatrix(nn.Module):
 
         # soft permutation for right matrix
         self.perm_logits = nn.Parameter(torch.randn(4, 4, dtype=torch.float32) * 0.01, requires_grad=True)
-        self.perm_temp = 0.5
+        # self.perm_logits = nn.Parameter(torch.eye(right_size, dtype=torch.float32) * 5.0, requires_grad=False)
+        self.perm_temp = 0.01
         self.perm_iters = 10
         self.use_perm = False
+        self.use_comp_mask = False
 
         self.add_diag = add_diag
         self.use_diag = True
@@ -114,10 +116,14 @@ class SVDDecomposeTransMatrix(nn.Module):
             if inv_t:
                 matrix_left, matrix_right = self.matrix_left_inv, self.matrix_right_inv
             matrix_right = self._apply_right_perm(matrix_right)
-            return kronecker_matmul(inp, matrix_left.to(inp), matrix_right.to(inp))
+            return _kronecker_matmul_masked(
+                inp, matrix_left.to(inp), matrix_right.to(inp), comp_mask=self.use_comp_mask
+            )
         matrix_left, matrix_right = matrix_u_left @ torch.diag(linear_diag_left) @ matrix_v_left.t(), matrix_u_right @ torch.diag(linear_diag_right) @ matrix_v_right.t()
         # matrix_right = self._apply_right_perm(matrix_right)
-        return kronecker_matmul(inp, matrix_left.to(inp), matrix_right.to(inp))
+        return _kronecker_matmul_masked(
+            inp, matrix_left.to(inp), matrix_right.to(inp), comp_mask=self.use_comp_mask
+        )
 
     def _apply_right_perm(self, matrix_right):
         if not self.use_perm or self.perm_logits is None:
@@ -206,9 +212,11 @@ class InvDecomposeTransMatrix(nn.Module):
 
         # soft permutation for right matrix
         self.perm_logits = nn.Parameter(torch.randn(4, 4, dtype=torch.float32) * 0.01, requires_grad=True)
+        # self.perm_logits = nn.Parameter(torch.eye(right_size, dtype=torch.float32) * 5.0, requires_grad=False)
         self.perm_temp = 0.01
         self.perm_iters = 10
         self.use_perm = False
+        self.use_comp_mask = False
 
         self.add_diag = add_diag
         self.use_diag = True
@@ -235,7 +243,9 @@ class InvDecomposeTransMatrix(nn.Module):
             if inv_t:
                 matrix_left, matrix_right = self.matrix_left_inv, self.matrix_right_inv
         # matrix_right = self._apply_right_perm(matrix_right)
-        return kronecker_matmul(inp, matrix_left.to(inp), matrix_right.to(inp))
+        return _kronecker_matmul_masked(
+            inp, matrix_left.to(inp), matrix_right.to(inp), comp_mask=self.use_comp_mask
+        )
 
     def _apply_right_perm(self, matrix_right):
         if not self.use_perm or self.perm_logits is None:

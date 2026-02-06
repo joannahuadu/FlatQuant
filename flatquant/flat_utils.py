@@ -16,6 +16,15 @@ def kronecker_matmul(x, hadL, hadR):
     x = torch.matmul(hadL.T, x)
     return x.reshape(init_shape)
 
+def _kronecker_matmul_masked(x, hadL, hadR, comp_mask=False):
+    init_shape = x.shape
+    x = x.reshape(-1, hadL.shape[0], hadR.shape[0])
+    x = torch.matmul(x, hadR)
+    x = torch.matmul(hadL.T, x)
+    if comp_mask and x.shape[-1] >= 4 and hadR.shape[0] == 4:
+        x = x.clone()
+        x[..., :, 2:4] = 0
+    return x.reshape(init_shape)
 
 def reparameterize_ln(ln, trans):
     # assert isinstance(ln, (LlamaRMSNorm, Qwen2RMSNorm))
@@ -33,10 +42,13 @@ def reparameterize_model(model):
         # enable soft permutation if present
         if layer.self_attn.ln_trans is not None:
             layer.self_attn.ln_trans.use_perm = True
+            layer.self_attn.ln_trans.use_comp_mask = True
         if layer.mlp.up_gate_trans is not None:
             layer.mlp.up_gate_trans.use_perm = True
+            layer.mlp.up_gate_trans.use_comp_mask = True
         if layer.mlp.down_trans is not None:
             layer.mlp.down_trans.use_perm = True
+            layer.mlp.down_trans.use_comp_mask = True
         layer.self_attn.reparameterize()
         layer.mlp.reparameterize()
         # fuse per-channel scaling to layernorm
