@@ -233,15 +233,18 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         set_require_grad_all(layer, False)
         trained_params, paras_name = [], []
         perm_logits = {}
-        if args.soft_perm and target_layer is not None:
+        if args.soft_perm:
+            trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.perm_logits", ]), "lr": args.flat_lr})
+            paras_name.append("trans.perm_logits")
             for name, trans in (
                 ("self_attn.ln_trans", layer.self_attn.ln_trans),
                 ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
                 ("mlp.down_trans", layer.mlp.down_trans),
             ):
+                trans.use_perm = True
+                trans.use_comp_mask = False
                 perm_logits[name] = trans.perm_logits
             perm_logits_by_layer[i] = perm_logits
-            trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.perm_logits", ]), "lr": args.flat_lr})
         if args.cali_trans:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.linear", ]), "lr": args.flat_lr})
             paras_name.append("trans.linear")
@@ -262,32 +265,37 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             scheduler = torch.optim.lr_scheduler.ChainedScheduler([scheduler_warmup, scheduler_main])
         else:
             scheduler = scheduler_main
-        # cache hidden states right before each trans
+        # cache trans outputs
         pre_trans_cache = {}
         hooks = []
 
-        def _cache_input(name):
-            def _hook(_mod, inp):
-                if inp and name not in pre_trans_cache:
-                    pre_trans_cache[name] = inp[0]
+        def _cache_output(name):
+            def _hook(_mod, _inp, out):
+                if out is None or name in pre_trans_cache:
+                    return
+                if isinstance(out, (tuple, list)):
+                    if out:
+                        pre_trans_cache[name] = out[0]
+                else:
+                    pre_trans_cache[name] = out
             return _hook
 
         if layer.self_attn.ln_trans is not None:
             hooks.append(
-                layer.self_attn.ln_trans.register_forward_pre_hook(
-                    _cache_input("self_attn.ln_trans")
+                layer.self_attn.ln_trans.register_forward_hook(
+                    _cache_output("self_attn.ln_trans")
                 )
             )
         if layer.mlp.up_gate_trans is not None:
             hooks.append(
-                layer.mlp.up_gate_trans.register_forward_pre_hook(
-                    _cache_input("mlp.up_gate_trans")
+                layer.mlp.up_gate_trans.register_forward_hook(
+                    _cache_output("mlp.up_gate_trans")
                 )
             )
         if layer.mlp.down_trans is not None:
             hooks.append(
-                layer.mlp.down_trans.register_forward_pre_hook(
-                    _cache_input("mlp.down_trans")
+                layer.mlp.down_trans.register_forward_hook(
+                    _cache_output("mlp.down_trans")
                 )
             )
 
@@ -313,9 +321,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                             cur_right = _get_right_matrix(trans)
                             if cur_right.shape == (4, 4) and target_right.shape == (2, 2):
                                 if args.soft_perm and name in perm_logits:
-                                    cur_block, p_soft = _soft_perm_main_block(
-                                        cur_right, perm_logits[name], temp=trans.perm_temp, n_iters=trans.perm_iters
-                                    )
+                                    cur_block = trans._last_perm_right[:2, :2]
+                                    p_soft = trans._last_p_soft
                                     if args.soft_perm_reg > 0:
                                         reg = (p_soft * (1.0 - p_soft)).mean()
                                         align_loss = align_loss + args.soft_perm_reg * reg
@@ -361,24 +368,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                 continue
                             if cur_left is None:
                                 continue
-                            if args.soft_perm and name in perm_logits:
-                                p_soft = _sinkhorn(
-                                    perm_logits[name] / trans.perm_temp, n_iters=trans.perm_iters
-                                )
-                                b_perm = p_soft.transpose(-1, -2) @ cur_right @ p_soft
-                            else:
-                                target_right = _find_target_matrix_right(target_layer, name)
-                                if target_right is None:
-                                    target_right = torch.zeros((2, 2), device=cur_right.device)
-                                best_perm = _best_perm(cur_right, target_right)
-                                b_perm = cur_right[best_perm][:, best_perm] if best_perm is not None else None
-                            if b_perm is None:
-                                continue
-                            x_t = pre_trans_cache.get(name, None)
-                            if x_t is None:
-                                continue
-                            x_t = x_t.detach()
-                            x_prime = kronecker_matmul(x_t, cur_left.to(x_t), b_perm.to(x_t))
+                            x_prime = pre_trans_cache.get(name, None)
                             if name == "self_attn.ln_trans":
                                 quantizer = layer.self_attn.q_proj.act_quantizer
                             elif name == "mlp.up_gate_trans":

@@ -89,6 +89,8 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.perm_iters = 10
         self.use_perm = False
         self.use_comp_mask = False
+        self._last_p_soft = None
+        self._last_perm_right = None
 
         self.add_diag = add_diag
         self.use_diag = True
@@ -127,12 +129,19 @@ class SVDDecomposeTransMatrix(nn.Module):
 
     def _apply_right_perm(self, matrix_right):
         if not self.use_perm or self.perm_logits is None:
+            self._last_p_soft = None
+            self._last_perm_right = None
             return matrix_right
         if self.perm_logits.shape != matrix_right.shape:
+            self._last_p_soft = None
+            self._last_perm_right = None
             return matrix_right
         perm_logits = self.perm_logits.to(matrix_right)
         p_soft = _sinkhorn(perm_logits / self.perm_temp, n_iters=self.perm_iters)
-        return p_soft.transpose(-1, -2) @ matrix_right @ p_soft
+        permuted = p_soft.transpose(-1, -2) @ matrix_right @ p_soft
+        self._last_p_soft = p_soft
+        self._last_perm_right = permuted
+        return permuted
 
     def to_eval_mode(self):
         if not self._eval_mode:
