@@ -116,10 +116,6 @@ def parser_gen():
                         help="Weight for aligning dim_right=4 right-matrix main block to dim_right=2.")
     parser.add_argument("--soft_perm", action="store_true", default=False,
                         help="Use learnable soft permutation for dim_right alignment (Sinkhorn).")
-    parser.add_argument("--soft_perm_temp", type=float, default=0.5,
-                        help="Temperature for Sinkhorn soft permutation.")
-    parser.add_argument("--soft_perm_iters", type=int, default=10,
-                        help="Number of Sinkhorn iterations.")
     parser.add_argument("--soft_perm_reg", type=float, default=0.0,
                         help="Regularization weight to encourage near-permutation.")
     parser.add_argument("--comp_zero_weight", type=float, default=0.0,
