@@ -350,6 +350,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 args.dim2_loss_weight = 0.0
                 args.comp_zero_weight = 0.0
                 optimizer = _prune_frozen_param_groups(optimizer)
+                if args.stage3_lr is not None:
+                    for g in optimizer.param_groups:
+                        g["lr"] = args.stage3_lr
             with traincast():
                 for j in range(args.nsamples // args.cali_bsz):
                     index = j * args.cali_bsz

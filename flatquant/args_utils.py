@@ -93,6 +93,8 @@ def parser_gen():
                         help="Epoch index to enter stage-2 (freeze perm logits).")
     parser.add_argument("--stage3_start", type=int, default=None,
                         help="Epoch index to enter stage-3 (freeze right; only L1).")
+    parser.add_argument("--stage3_lr", type=float, default=None,
+                        help="If set, override optimizer LR when entering stage-3 (scheduler kept).")
     parser.add_argument("--cali_trans", default=False, action="store_true", 
                         help="Enable calibration of transformations.")
     parser.add_argument("--add_diag", default=False, action="store_true", 
