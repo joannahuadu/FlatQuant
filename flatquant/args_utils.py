@@ -85,6 +85,14 @@ def parser_gen():
                         help="Cosine LR minimum as a ratio of flat_lr (eta_min = flat_lr * ratio).")
     parser.add_argument("--flat_lr_tmax_mult", type=float, default=1.0,
                         help="Multiplier for cosine T_max to slow LR decay (>1 slows).")
+    parser.add_argument("--use_stage2", action="store_true", default=False,
+                        help="Enable stage-2: freeze perm logits and drop align loss.")
+    parser.add_argument("--use_stage3", action="store_true", default=False,
+                        help="Enable stage-3: freeze right matrices/perm logits and train only L1.")
+    parser.add_argument("--stage2_start", type=int, default=None,
+                        help="Epoch index to enter stage-2 (freeze perm logits).")
+    parser.add_argument("--stage3_start", type=int, default=None,
+                        help="Epoch index to enter stage-3 (freeze right; only L1).")
     parser.add_argument("--cali_trans", default=False, action="store_true", 
                         help="Enable calibration of transformations.")
     parser.add_argument("--add_diag", default=False, action="store_true", 

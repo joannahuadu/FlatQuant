@@ -306,9 +306,28 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
 
         # check_params_grad(layer)
         # set_quantizer_state(layer, False)
+        def _prune_frozen_param_groups(optim):
+            optim.param_groups = [g for g in optim.param_groups if any(p.requires_grad for p in g["params"])]
+            return optim
+
         for epoch in range(args.epochs):
             mse = 0
             start_tick = time.time()
+            # -------- stage scheduling --------
+            if args.use_stage2 and args.stage2_start is not None and epoch == args.stage2_start:
+                for p in perm_logits.values():
+                    p.requires_grad_(False)
+                args.dim2_loss_weight = 0.0
+                optimizer = _prune_frozen_param_groups(optimizer)
+            if args.use_stage3 and args.stage3_start is not None and epoch == args.stage3_start:
+                for name, param in layer.named_parameters():
+                    if "right" in name:
+                        param.requires_grad = False
+                for p in perm_logits.values():
+                    p.requires_grad_(False)
+                args.dim2_loss_weight = 0.0
+                args.comp_zero_weight = 0.0
+                optimizer = _prune_frozen_param_groups(optimizer)
             with traincast():
                 for j in range(args.nsamples // args.cali_bsz):
                     index = j * args.cali_bsz
