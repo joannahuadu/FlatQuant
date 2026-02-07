@@ -381,8 +381,6 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                             else:
                                 quantizer = layer.mlp.down_proj.act_quantizer
                             tau = _zero_deadzone_tau(quantizer, x_prime)
-                            if tau is None:
-                                continue
                             x_prime_reshaped = x_prime.view(*x_prime.shape[:-1], cur_left.shape[0], cur_right.shape[0])
                             tau_reshaped = tau.view(*tau.shape[:-1], cur_left.shape[0], cur_right.shape[0])
                             comp = x_prime_reshaped[..., :, 2:4]
