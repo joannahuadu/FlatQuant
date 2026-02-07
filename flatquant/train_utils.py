@@ -307,7 +307,21 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         # check_params_grad(layer)
         # set_quantizer_state(layer, False)
         def _prune_frozen_param_groups(optim):
-            optim.param_groups = [g for g in optim.param_groups if any(p.requires_grad for p in g["params"])]
+            keep_groups = []
+            kept_params = set()
+            for g in optim.param_groups:
+                live_params = [p for p in g["params"] if p.requires_grad]
+                if len(live_params) == 0:
+                    for p in g["params"]:
+                        optim.state.pop(p, None)
+                    continue
+                g["params"] = live_params
+                keep_groups.append(g)
+                kept_params.update(live_params)
+            for p in list(optim.state.keys()):
+                if p not in kept_params:
+                    optim.state.pop(p, None)
+            optim.param_groups = keep_groups
             return optim
 
         for epoch in range(args.epochs):
