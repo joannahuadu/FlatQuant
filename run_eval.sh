@@ -23,7 +23,7 @@ nohup env CUDA_VISIBLE_DEVICES=2 python main.py \
   --output_dir ./outputs \
   --save_matrix \
   --lm_eval \
-  --tasks winogrande openbookqa \
+  --tasks winogrande openbookqa mmlu arc_challenge \
   --lm_eval_batch_size 16 \
   >> "$LOG_DIR/eval_w4a4_dim_right=2.log" 2>&1 &
 

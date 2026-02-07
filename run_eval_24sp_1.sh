@@ -63,14 +63,14 @@ TS="$(date +%Y%m%d_%H%M%S)"
 
 # sleep 30
 
-nohup env CUDA_VISIBLE_DEVICES=0 python main.py \
+nohup env CUDA_VISIBLE_DEVICES=1 python main.py \
   --model "$MODEL_PATH" \
   --w_bits 4 \
   --a_bits 4 \
   --gptq \
   --cali_bsz 4 \
   --epoch 30 \
-  --flat_lr 2e-3 \
+  --flat_lr 5e-3 \
   --lwc \
   --lac \
   --cali_trans \
@@ -87,32 +87,32 @@ nohup env CUDA_VISIBLE_DEVICES=0 python main.py \
   --lm_eval \
   --tasks winogrande openbookqa mmlu arc_challenge \
   --lm_eval_batch_size 16 \
-  >> "$LOG_DIR/eval_w4a4_24sp_l20_l30_alpha0_ep30_lr2e-3.log" 2>&1 &
+  >> "$LOG_DIR/eval_w4a4_24sp_l20_l30_alpha0_ep30_lr5e-3.log" 2>&1 &
 
 # sleep 30
 
-# nohup env CUDA_VISIBLE_DEVICES=1 python main.py \
+# nohup env CUDA_VISIBLE_DEVICES=2 python main.py \
 #   --model "$MODEL_PATH" \
 #   --w_bits 4 \
 #   --a_bits 4 \
 #   --gptq \
 #   --cali_bsz 4 \
 #   --epoch 30 \
-#   --flat_lr 2e-3 \
+#   --flat_lr 5e-4 \
 #   --lwc \
 #   --lac \
 #   --cali_trans \
 #   --add_diag \
 #   --dim_right 4 \
 #   --dim2_matrix_path ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260204_195112/flat_matrices.pth \
-#   --dim2_loss_weight 0 \
+#   --dim2_loss_weight 0.0001 \
 #   --soft_perm \
 #   --soft_perm_reg 0.1 \
 #   --comp_tau_alpha 0.5 \
-#   --comp_zero_weight 0 \
+#   --comp_zero_weight 0.05 \
 #   --output_dir ./outputs \
 #   --save_matrix \
 #   --lm_eval \
 #   --tasks winogrande openbookqa mmlu arc_challenge \
 #   --lm_eval_batch_size 16 \
-#   >> "$LOG_DIR/eval_w4a4_24sp_l20.0001_l30.05_alpha0.5_ep30_lr1e-3.log" 2>&1 &
+#   >> "$LOG_DIR/eval_w4a4_24sp_l20.0001_l30.05_alpha0.5_ep30_lr5e-4.log" 2>&1 &

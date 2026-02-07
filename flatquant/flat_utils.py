@@ -39,16 +39,15 @@ def reparameterize_ln(ln, trans):
 def reparameterize_model(model):
     for idx in range(model.config.num_hidden_layers):
         layer = model.model.layers[idx]
-        # enable soft permutation if present
-        # if layer.self_attn.ln_trans is not None:
-        #     layer.self_attn.ln_trans.use_perm = True
-        #     layer.self_attn.ln_trans.use_comp_mask = True
-        # if layer.mlp.up_gate_trans is not None:
-        #     layer.mlp.up_gate_trans.use_perm = True
-        #     layer.mlp.up_gate_trans.use_comp_mask = True
-        # if layer.mlp.down_trans is not None:
-        #     layer.mlp.down_trans.use_perm = True
-        #     layer.mlp.down_trans.use_comp_mask = True
+        if layer.self_attn.ln_trans is not None:
+            layer.self_attn.ln_trans.use_perm = True
+            layer.self_attn.ln_trans.use_comp_mask = False
+        if layer.mlp.up_gate_trans is not None:
+            layer.mlp.up_gate_trans.use_perm = True
+            layer.mlp.up_gate_trans.use_comp_mask = False
+        if layer.mlp.down_trans is not None:
+            layer.mlp.down_trans.use_perm = True
+            layer.mlp.down_trans.use_comp_mask = False
         layer.self_attn.reparameterize()
         layer.mlp.reparameterize()
         # fuse per-channel scaling to layernorm
