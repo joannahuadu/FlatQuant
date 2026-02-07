@@ -323,17 +323,25 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     optim.state.pop(p, None)
             optim.param_groups = keep_groups
             return optim
+        def _save_stage_ckpt(tag):
+            ckpt = dict(flat_parameters)
+            ckpt[i] = get_paras_dict_by_name(layer, required_names=paras_name)
+            path = os.path.join(args.exp_dir, f"flat_parameters_{tag}.pth")
+            torch.save(ckpt, path)
+            logger.info(f"saved stage checkpoint: {path}")
 
         for epoch in range(args.epochs):
             mse = 0
             start_tick = time.time()
             # -------- stage scheduling --------
             if args.use_stage2 and args.stage2_start is not None and epoch == args.stage2_start:
+                _save_stage_ckpt("stage1")
                 for p in perm_logits.values():
                     p.requires_grad_(False)
                 args.dim2_loss_weight = 0.0
                 optimizer = _prune_frozen_param_groups(optimizer)
             if args.use_stage3 and args.stage3_start is not None and epoch == args.stage3_start:
+                _save_stage_ckpt("stage2")
                 for name, param in layer.named_parameters():
                     if "right" in name:
                         param.requires_grad = False
@@ -431,6 +439,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             cur_lr = optimizer.state_dict()['param_groups'][0]['lr']
             logger.info(f"layer {i} lwc lac iter {epoch}, lr {cur_lr:.8f}  time {time.time() - start_tick:.6f}s, mse: {mse:.8f}" )
 
+        _save_stage_ckpt("stage3" if args.use_stage3 else "stage_last")
         for h in hooks:
             h.remove()
 
