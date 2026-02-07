@@ -259,7 +259,12 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             paras_name.append("clip_factor_a")
 
         optimizer = torch.optim.AdamW(trained_params)
-        scheduler_main = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs * (args.nsamples // args.cali_bsz), eta_min=args.flat_lr * 1e-3)
+        steps_per_epoch = max(1, args.nsamples // args.cali_bsz)
+        tmax = max(1, int(args.epochs * steps_per_epoch * args.flat_lr_tmax_mult))
+        eta_min = args.flat_lr * args.flat_lr_min_ratio
+        scheduler_main = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=tmax, eta_min=eta_min
+        )
         if args.warmup:
             scheduler_warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=16)
             scheduler = torch.optim.lr_scheduler.ChainedScheduler([scheduler_warmup, scheduler_main])

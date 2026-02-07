@@ -81,6 +81,10 @@ def parser_gen():
                         help='Batch size for FlatQuant. Default is 4.')
     parser.add_argument("--flat_lr", type=float, default=1e-5, 
                         help='Learning rate for learnable transformation.')
+    parser.add_argument("--flat_lr_min_ratio", type=float, default=1e-3,
+                        help="Cosine LR minimum as a ratio of flat_lr (eta_min = flat_lr * ratio).")
+    parser.add_argument("--flat_lr_tmax_mult", type=float, default=1.0,
+                        help="Multiplier for cosine T_max to slow LR decay (>1 slows).")
     parser.add_argument("--cali_trans", default=False, action="store_true", 
                         help="Enable calibration of transformations.")
     parser.add_argument("--add_diag", default=False, action="store_true", 
