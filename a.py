@@ -1,7 +1,13 @@
 import torch
-a = torch.load("./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260205_200127/flat_matrices.pth")
-perm_logits = a[0]['self_attn.ln_trans.perm_logits']
-
+a = torch.load("./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260202_003601/flat_matrices.pth")
+# ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260202_003601/flat_matrices.pth
+print(a[0].keys())
+# perm_logits = a[0]['self_attn.ln_trans.perm_logits']
+# matrix_u_left, matrix_u_right = a[0]['self_attn.ln_trans.linear_u_left.parametrizations.weight.original'], a[0]['self_attn.ln_trans.linear_u_right.parametrizations.weight.original']
+# matrix_v_left, matrix_v_right = a[0]['self_attn.ln_trans.linear_v_left.parametrizations.weight.original'], a[0]['self_attn.ln_trans.linear_v_right.parametrizations.weight.original']
+# linear_diag_left, linear_diag_right = a[0]['self_attn.ln_trans.linear_diag_left'],  a[0]['self_attn.ln_trans.linear_diag_right']
+# matrix_left, matrix_right = matrix_u_left @ torch.diag(linear_diag_left) @ matrix_v_left.t(), matrix_u_right @ torch.diag(linear_diag_right) @ matrix_v_right.t()
+matrix_left, matrix_right = a[0]['self_attn.ln_trans.matrix_left'], a[0]['self_attn.ln_trans.matrix_right']
 def _sinkhorn(logits, n_iters=10):
     log_p = logits
     for _ in range(n_iters):
@@ -12,5 +18,8 @@ def _sinkhorn(logits, n_iters=10):
 temp = 0.01
 n_iters = 10
 
-p_soft = _sinkhorn(perm_logits / temp, n_iters=n_iters)
-print(p_soft)
+# p_soft = _sinkhorn(perm_logits / temp, n_iters=n_iters)
+# permuted = p_soft.transpose(-1, -2) @ matrix_right @ p_soft
+# print(p_soft)
+print(matrix_right)
+# print(permuted)

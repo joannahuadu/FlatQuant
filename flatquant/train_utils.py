@@ -233,7 +233,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         set_require_grad_all(layer, False)
         trained_params, paras_name = [], []
         perm_logits = {}
-        if args.soft_perm:
+        if args.soft_perm and target_layer is not None:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.perm_logits", ]), "lr": args.flat_lr})
             paras_name.append("trans.perm_logits")
             for name, trans in (

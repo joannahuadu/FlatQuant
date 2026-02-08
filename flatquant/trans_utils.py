@@ -118,14 +118,14 @@ class SVDDecomposeTransMatrix(nn.Module):
             matrix_left, matrix_right = self.matrix_left, self.matrix_right
             if inv_t:
                 matrix_left, matrix_right = self.matrix_left_inv, self.matrix_right_inv
-            if not inv_t:
-                matrix_right = self._apply_right_perm(matrix_right)
+            # if not inv_t:
+            matrix_right = self._apply_right_perm(matrix_right)
             return _kronecker_matmul_masked(
                 inp, matrix_left.to(inp), matrix_right.to(inp), comp_mask=self.use_comp_mask
             )
         matrix_left, matrix_right = matrix_u_left @ torch.diag(linear_diag_left) @ matrix_v_left.t(), matrix_u_right @ torch.diag(linear_diag_right) @ matrix_v_right.t()
-        if not inv_t:
-            matrix_right = self._apply_right_perm(matrix_right)
+        # if not inv_t:
+        matrix_right = self._apply_right_perm(matrix_right)
         return _kronecker_matmul_masked(
             inp, matrix_left.to(inp), matrix_right.to(inp), comp_mask=self.use_comp_mask
         )
@@ -253,8 +253,8 @@ class InvDecomposeTransMatrix(nn.Module):
             matrix_left, matrix_right = self.matrix_left, self.matrix_right
             if inv_t:
                 matrix_left, matrix_right = self.matrix_left_inv, self.matrix_right_inv
-        if not inv_t:
-            matrix_right = self._apply_right_perm(matrix_right)
+        # if not inv_t:
+        matrix_right = self._apply_right_perm(matrix_right)
         return _kronecker_matmul_masked(
             inp, matrix_left.to(inp), matrix_right.to(inp), comp_mask=self.use_comp_mask
         )
