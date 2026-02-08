@@ -132,6 +132,10 @@ def parser_gen():
                         help="Use learnable soft permutation for dim_right alignment (Sinkhorn).")
     parser.add_argument("--soft_perm_reg", type=float, default=0.0,
                         help="Regularization weight to encourage near-permutation.")
+    parser.add_argument("--use_perm", action=argparse.BooleanOptionalAction, default=True,
+                        help="Enable soft permutation during reparameterization.")
+    parser.add_argument("--use_comp_mask", action=argparse.BooleanOptionalAction, default=False,
+                        help="Enable complement-space masking during reparameterization.")
     parser.add_argument("--comp_zero_weight", type=float, default=0.0,
                         help="Weight for forcing complement-space outputs into quantization zero-zone.")
     parser.add_argument("--comp_tau_alpha", type=float, default=1.0,

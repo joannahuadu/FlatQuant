@@ -87,7 +87,9 @@ def get_flatness(args, logger, transform_type=None):
             model = apply_flatquant_to_model(args, model)
             logger.info("Finished applying FlatQuant to model.")
             flat_utils.load_flat_matrices(args, model, path=args.matrix_path)
-            flat_utils.reparameterize_model(model)
+            flat_utils.reparameterize_model(
+                model, use_perm=args.use_perm, use_comp_mask=args.use_comp_mask
+            )
             logger.info("Finished reparameterize model.")
             quant_utils.set_quantizer_state(model, enable=False)
         elif transform_type == "hadamard":

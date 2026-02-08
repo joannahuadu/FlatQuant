@@ -68,7 +68,9 @@ def main():
             train_utils.cali_flat_quant(args, model, trainloader, utils.DEV, logger=logger)
         if args.save_matrix and not args.reload_matrix:
             flat_utils.save_flat_matrices(args, model)
-        flat_utils.reparameterize_model(model)
+        flat_utils.reparameterize_model(
+            model, use_perm=args.use_perm, use_comp_mask=args.use_comp_mask
+        )
         logger.info("Finished reparameterize model.")
 
     if args.w_bits < 16:
