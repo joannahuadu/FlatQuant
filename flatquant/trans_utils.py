@@ -167,7 +167,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         perm = _sinkhorn(x_perm_logits / self.x_perm_temp, n_iters=self.x_perm_iters)
         self._last_x_p_soft = perm
         x = tensor.view(-1, perm.shape[0], self.block_size)
-        x = torch.bmm(x, perm)
+        y = torch.einsum('nbk,bkj->nbj', x, perm)
         return x.view(*tensor.shape[:-1], self.hidden_dim)
 
     def to_eval_mode(self):

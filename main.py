@@ -69,7 +69,7 @@ def main():
         if args.save_matrix and not args.reload_matrix:
             flat_utils.save_flat_matrices(args, model)
         flat_utils.reparameterize_model(
-            model, use_perm=args.use_perm, use_comp_mask=args.use_comp_mask
+            model, use_x_perm=args.use_x_perm, use_perm=args.use_perm, use_comp_mask=args.use_comp_mask
         )
         logger.info("Finished reparameterize model.")
 

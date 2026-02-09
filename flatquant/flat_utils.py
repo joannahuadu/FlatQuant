@@ -36,16 +36,19 @@ def reparameterize_ln(ln, trans):
     trans.use_diag = False
 
 
-def reparameterize_model(model, use_perm=True, use_comp_mask=False):
+def reparameterize_model(model, use_x_perm=True, use_perm=True, use_comp_mask=False):
     for idx in range(model.config.num_hidden_layers):
         layer = model.model.layers[idx]
         if layer.self_attn.ln_trans is not None:
+            layer.self_attn.ln_trans.use_x_perm = use_x_perm
             layer.self_attn.ln_trans.use_perm = use_perm
             layer.self_attn.ln_trans.use_comp_mask = use_comp_mask
         if layer.mlp.up_gate_trans is not None:
+            layer.self_attn.ln_trans.use_x_perm = use_x_perm
             layer.mlp.up_gate_trans.use_perm = use_perm
             layer.mlp.up_gate_trans.use_comp_mask = use_comp_mask
         if layer.mlp.down_trans is not None:
+            layer.self_attn.ln_trans.use_x_perm = use_x_perm
             layer.mlp.down_trans.use_perm = use_perm
             layer.mlp.down_trans.use_comp_mask = use_comp_mask
         layer.self_attn.reparameterize()
