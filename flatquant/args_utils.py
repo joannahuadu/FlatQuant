@@ -132,6 +132,8 @@ def parser_gen():
                         help="Use learnable soft permutation for dim_right alignment (Sinkhorn).")
     parser.add_argument("--soft_perm_reg", type=float, default=0.0,
                         help="Regularization weight to encourage near-permutation.")
+    parser.add_argument("--soft_x_perm", action="store_true", default=False,
+                        help="Enable block-wise Sinkhorn permutation on activations (post AXB).")
     parser.add_argument("--use_perm", action=argparse.BooleanOptionalAction, default=True,
                         help="Enable soft permutation during reparameterization.")
     parser.add_argument("--use_comp_mask", action=argparse.BooleanOptionalAction, default=False,

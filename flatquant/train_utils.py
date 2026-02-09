@@ -233,7 +233,18 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         set_require_grad_all(layer, False)
         trained_params, paras_name = [], []
         perm_logits = {}
-        if args.soft_perm and target_layer is not None:
+        if args.soft_x_perm:
+            trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.x_perm_logits", ]), "lr": args.flat_lr})
+            paras_name.append("trans.x_perm_logits")
+            for name, trans in (
+                ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                ("mlp.down_trans", layer.mlp.down_trans),
+            ):
+                trans.use_x_perm = True
+                perm_logits[name] = trans.x_perm_logits
+            perm_logits_by_layer[i] = perm_logits
+        elif args.soft_perm and target_layer is not None:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.perm_logits", ]), "lr": args.flat_lr})
             paras_name.append("trans.perm_logits")
             for name, trans in (
@@ -433,6 +444,17 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                             comp_loss = comp_loss + torch.mean(torch.relu(comp.abs() - tau_comp) ** 2)
                         if comp_loss != 0.0:
                             loss = loss + args.comp_zero_weight * comp_loss
+                    if args.soft_x_perm and args.soft_perm_reg > 0:
+                        x_perm_reg = 0.0
+                        for name, trans in (
+                            ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                            ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                            ("mlp.down_trans", layer.mlp.down_trans),
+                        ):
+                            p_soft = trans._last_x_p_soft
+                            x_perm_reg = x_perm_reg + (p_soft * (1.0 - p_soft)).mean()
+                        if x_perm_reg != 0.0:
+                            loss = loss + args.soft_perm_reg * x_perm_reg
                     mse += loss.detach().cpu()
                     loss = loss / loss.clone().detach()
                     optimizer.zero_grad()

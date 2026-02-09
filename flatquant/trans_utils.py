@@ -92,6 +92,17 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.use_comp_mask = False
         self._last_p_soft = None
         self._last_perm_right = None
+        self._last_x_p_soft = None
+        self.use_x_perm = False
+        self.block_size = 64
+        self.hidden_dim = left_size * right_size
+        num_blocks = self.hidden_dim // self.block_size
+        self.x_perm_logits = nn.Parameter(
+            torch.randn(num_blocks, self.block_size, self.block_size, dtype=torch.float32) * 0.01,
+            requires_grad=True,
+        )
+        self.x_perm_temp = 0.01
+        self.x_perm_iters = 10
 
         self.add_diag = add_diag
         self.use_diag = True
@@ -118,17 +129,22 @@ class SVDDecomposeTransMatrix(nn.Module):
             matrix_left, matrix_right = self.matrix_left, self.matrix_right
             if inv_t:
                 matrix_left, matrix_right = self.matrix_left_inv, self.matrix_right_inv
-            # if not inv_t:
             matrix_right = self._apply_right_perm(matrix_right)
-            return _kronecker_matmul_masked(
+            out = _kronecker_matmul_masked(
                 inp, matrix_left.to(inp), matrix_right.to(inp), comp_mask=self.use_comp_mask
             )
+            if self.use_x_perm and self.x_perm_logits is not None:
+                out = self._apply_x_perm(out)
+            return out
         matrix_left, matrix_right = matrix_u_left @ torch.diag(linear_diag_left) @ matrix_v_left.t(), matrix_u_right @ torch.diag(linear_diag_right) @ matrix_v_right.t()
         # if not inv_t:
         matrix_right = self._apply_right_perm(matrix_right)
-        return _kronecker_matmul_masked(
+        out = _kronecker_matmul_masked(
             inp, matrix_left.to(inp), matrix_right.to(inp), comp_mask=self.use_comp_mask
         )
+        if self.use_x_perm and self.x_perm_logits is not None:
+            out = self._apply_x_perm(out)
+        return out
 
     def _apply_right_perm(self, matrix_right):
         if not self.use_perm or self.perm_logits is None:
@@ -145,6 +161,14 @@ class SVDDecomposeTransMatrix(nn.Module):
         self._last_p_soft = p_soft
         self._last_perm_right = permuted
         return permuted
+
+    def _apply_x_perm(self, tensor):
+        x_perm_logits = self.x_perm_logits.to(tensor)
+        perm = _sinkhorn(x_perm_logits / self.x_perm_temp, n_iters=self.x_perm_iters)
+        self._last_x_p_soft = perm
+        x = tensor.view(-1, perm.shape[0], self.block_size)
+        x = torch.bmm(x, perm)
+        return x.view(*tensor.shape[:-1], self.hidden_dim)
 
     def to_eval_mode(self):
         if not self._eval_mode:
