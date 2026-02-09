@@ -142,6 +142,8 @@ def parser_gen():
                         help="Enable complement-space masking during reparameterization.")
     parser.add_argument("--comp_zero_weight", type=float, default=0.0,
                         help="Weight for forcing complement-space outputs into quantization zero-zone.")
+    parser.add_argument("--nm_zero_weight", type=float, default=0.0,
+                        help="Weight for forcing nm-space outputs (reshape to hidden/4 x 4) into quantization zero-zone.")
     parser.add_argument("--comp_tau_alpha", type=float, default=1.0,
                         help="Scale factor for tau in complement-space loss (1.0 keeps original).")
     
