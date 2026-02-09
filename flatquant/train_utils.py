@@ -360,6 +360,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     p.requires_grad_(False)
                 args.dim2_loss_weight = 0.0
                 args.comp_zero_weight = 0.0
+                args.nm_zero_weight = 0.0
                 optimizer = _prune_frozen_param_groups(optimizer)
                 if args.stage3_lr is not None:
                     for g in optimizer.param_groups:
@@ -413,7 +414,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                     )
                         if align_loss != 0.0:
                             loss = loss + args.dim2_loss_weight * align_loss
-                    if args.comp_zero_weight > 0:
+                    if args.comp_zero_weight > 0 and target_layer is not None:
                         comp_loss = 0.0
                         for name, trans in (
                             ("self_attn.ln_trans", layer.self_attn.ln_trans),
@@ -444,6 +445,31 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                             comp_loss = comp_loss + torch.mean(torch.relu(comp.abs() - tau_comp) ** 2)
                         if comp_loss != 0.0:
                             loss = loss + args.comp_zero_weight * comp_loss
+                    if args.nm_zero_weight > 0:
+                        nm_loss = 0.0
+                        for name, trans in (
+                            ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                            ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                            ("mlp.down_trans", layer.mlp.down_trans),
+                        ):
+                            x_prime = pre_trans_cache.get(name, None)
+                            if name == "self_attn.ln_trans":
+                                quantizer = layer.self_attn.q_proj.act_quantizer
+                            elif name == "mlp.up_gate_trans":
+                                quantizer = layer.mlp.up_proj.act_quantizer
+                            else:
+                                quantizer = layer.mlp.down_proj.act_quantizer
+                            tau = _zero_deadzone_tau(quantizer, x_prime)
+                            hidden_dim = x_prime.shape[-1]
+                            nm_rows = hidden_dim // 4
+                            x_prime_reshaped = x_prime.view(*x_prime.shape[:-1], nm_rows, 4)
+                            tau_reshaped = tau.view(*tau.shape[:-1], nm_rows, 4)
+                            comp = x_prime_reshaped[..., :, 2:4]
+                            tau_comp = tau_reshaped[..., :, 2:4]
+                            tau_comp = tau_comp * args.comp_tau_alpha
+                            nm_loss = nm_loss + torch.mean(torch.relu(comp.abs() - tau_comp) ** 2)
+                        if nm_loss != 0.0:
+                            loss = loss + args.nm_zero_weight * nm_loss
                     if args.soft_x_perm and args.soft_perm_reg > 0:
                         x_perm_reg = 0.0
                         for name, trans in (
