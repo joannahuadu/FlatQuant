@@ -105,9 +105,11 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
 
     _plot_and_save(x_np, save_path)
     block_cols = min(64, x_np.shape[1])
+    block_rows = min(64, x_np.shape[0])
     block_path = save_path.with_name(save_path.stem + "_c0-63.png")
     _plot_and_save(x_np[:, :block_cols], block_path, title_suffix=f"Columns 0-{block_cols-1}")
-
+    block_path_ = save_path.with_name(save_path.stem + "_r0-63_c0-63.png")
+    _plot_and_save(x_np[:block_rows, :block_cols], block_path_, title_suffix=f"Row 0-{block_rows-1}, Columns 0-{block_cols-1}")
 
 def _register_obs_hook(model, args, logger):
     """Attach hooks to capture activations according to args."""
