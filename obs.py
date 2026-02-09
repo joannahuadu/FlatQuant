@@ -70,7 +70,7 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
             logger.error(f"Cannot reshape activation to (2048, 4096): {exc}")
             return
 
-    x_np = x.detach().abs().to(dtype=torch.float16).cpu().numpy()
+    x_np = x.abs().float().cpu()
     flat = x_np.view(-1)
     lo = torch.quantile(flat, 0.01).item()
     hi = torch.quantile(flat, 0.99).item()
@@ -79,20 +79,28 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
     x_np = x_np.numpy()
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.figure(figsize=(12, 6))
-    plt.imshow(
-        x_np,
-        aspect="auto",
-        cmap="magma",
-        norm=colors.LogNorm(vmin=vmin, vmax=vmax),
-    )
-    plt.colorbar(label="|X| (log-normalized)")
-    plt.xlabel("Hidden dimension")
-    plt.ylabel("Sequence position")
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-    logger.info(f"Heatmap saved to {save_path}")
+
+    def _plot_and_save(array, path, title_suffix=""):
+        plt.figure(figsize=(12, 6))
+        plt.imshow(
+            array,
+            aspect="auto",
+            cmap="magma",
+            norm=colors.LogNorm(vmin=vmin, vmax=vmax),
+        )
+        plt.colorbar(label="|X| (log-normalized)")
+        plt.xlabel("Hidden dimension")
+        plt.ylabel("Sequence position")
+        if title_suffix:
+            plt.title(title_suffix)
+        plt.tight_layout()
+        plt.savefig(path)
+        plt.close()
+        logger.info(f"Heatmap saved to {path}")
+
+    _plot_and_save(x_np, save_path)
+    block_path = save_path.with_name(save_path.stem + "_c0-63.png")
+    _plot_and_save(x_np[:, :64], block_path, title_suffix="Columns 0-63")
 
 
 def _register_obs_hook(model, args, logger):
