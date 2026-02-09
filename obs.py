@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import matplotlib.colors as colors
 import torch
 import transformers
 import torch.nn.functional as F
@@ -69,11 +70,23 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
             logger.error(f"Cannot reshape activation to (2048, 4096): {exc}")
             return
 
-    x_np = x.abs().cpu().numpy()
+    x_np = x.detach().abs().to(dtype=torch.float16).cpu().numpy()
+    flat = x_np.view(-1)
+    lo = torch.quantile(flat, 0.01).item()
+    hi = torch.quantile(flat, 0.99).item()
+    vmin = max(lo, 1e-9)
+    vmax = max(hi, vmin * 10)
+    x_np = x_np.numpy()
+
     save_path.parent.mkdir(parents=True, exist_ok=True)
     plt.figure(figsize=(12, 6))
-    plt.imshow(x_np, aspect="auto", cmap="inferno")
-    plt.colorbar(label="|X|")
+    plt.imshow(
+        x_np,
+        aspect="auto",
+        cmap="magma",
+        norm=colors.LogNorm(vmin=vmin, vmax=vmax),
+    )
+    plt.colorbar(label="|X| (log-normalized)")
     plt.xlabel("Hidden dimension")
     plt.ylabel("Sequence position")
     plt.tight_layout()
@@ -169,7 +182,12 @@ def _maybe_save_heatmap(captured, args, logger):
     if not args.obs or captured is None or captured.get("tensor") is None:
         logger.info("No activation captured; skip heatmap.")
         return
-    save_path = Path(args.obs_save_path) if args.obs_save_path else Path(args.exp_dir) / "obs_heatmap.png"
+    tag = captured.get("tag", "unknown")
+    # sanitize path components
+    safe_target = args.obs_target.replace(".", "_").replace("/", "_")
+    safe_hook = args.obs_hook_position.replace("/", "_")
+    filename = f"obs_{safe_target}_{safe_hook}_{tag}.png"
+    save_path = Path(args.obs_save_path) if args.obs_save_path else Path(args.exp_dir) / filename
     _build_heatmap(captured["tensor"], save_path, logger)
 
 
