@@ -413,7 +413,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                     )
                         if align_loss != 0.0:
                             loss = loss + args.dim2_loss_weight * align_loss
-                    if args.comp_zero_weight > 0 and target_layer is not None:
+                    if args.comp_zero_weight > 0:
                         comp_loss = 0.0
                         for name, trans in (
                             ("self_attn.ln_trans", layer.self_attn.ln_trans),
