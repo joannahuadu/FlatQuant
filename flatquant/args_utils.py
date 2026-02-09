@@ -196,6 +196,18 @@ def parser_gen():
     parser.add_argument('--eigen_r', type=int, default=512,
                         help='Rank for eigen compensation.')
 
+    # Observation / debug hooks
+    parser.add_argument('--obs', action='store_true', default=False,
+                        help='Enable activation observation and heatmap export during evaluation.')
+    parser.add_argument('--obs_target', type=str, default='model.model.layers.0.mlp.up_proj',
+                        help='Dot-path to the module whose input activations will be captured.')
+    parser.add_argument('--obs_hook_position', type=str,
+                        choices=['post_trans', 'pre_quant', 'post_quant', 'pre_wx'],
+                        default='post_trans',
+                        help='Hook point for activation capture: after trans, before quantization, after quantization, or before WX when not quantizing.')
+    parser.add_argument('--obs_save_path', type=str, default=None,
+                        help='Optional path to save the generated heatmap image. Defaults to <exp_dir>/obs_heatmap.png')
+
     args = parser.parse_args()
     if args.a_groupsize > -1:
         raise NotImplementedError
