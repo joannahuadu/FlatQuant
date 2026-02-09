@@ -72,8 +72,13 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
 
     x_np = x.abs().float().cpu()
     flat = x_np.view(-1)
-    lo = torch.quantile(flat, 0.01).item()
-    hi = torch.quantile(flat, 0.99).item()
+    if flat.numel() > 2_000_000:
+        idx = torch.randperm(flat.numel(), device=flat.device)[:2_000_000]
+        flat_q = flat[idx]
+    else:
+        flat_q = flat
+    lo = torch.quantile(flat_q, 0.01).item()
+    hi = torch.quantile(flat_q, 0.99).item()
     vmin = max(lo, 1e-9)
     vmax = max(hi, vmin * 10)
     x_np = x_np.numpy()
