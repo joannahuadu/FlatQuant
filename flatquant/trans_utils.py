@@ -90,6 +90,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.perm_iters = 10
         self.use_perm = False
         self.use_comp_mask = False
+        self.use_x_mask = False
         self._last_p_soft = None
         self._last_perm_right = None
         self._last_x_p_soft = None
@@ -135,6 +136,8 @@ class SVDDecomposeTransMatrix(nn.Module):
             )
             if self.use_x_perm and self.x_perm_logits is not None:
                 out = self._apply_x_perm(out)
+                if self.use_x_mask:
+                    out = self._apply_x_mask(out)
             return out
         matrix_left, matrix_right = matrix_u_left @ torch.diag(linear_diag_left) @ matrix_v_left.t(), matrix_u_right @ torch.diag(linear_diag_right) @ matrix_v_right.t()
         # if not inv_t:
@@ -144,6 +147,8 @@ class SVDDecomposeTransMatrix(nn.Module):
         )
         if self.use_x_perm and self.x_perm_logits is not None:
             out = self._apply_x_perm(out)
+            if self.use_x_mask:
+                out = self._apply_x_mask(out)
         return out
 
     def _apply_right_perm(self, matrix_right):
@@ -169,6 +174,12 @@ class SVDDecomposeTransMatrix(nn.Module):
         x = tensor.view(-1, perm.shape[0], self.block_size)
         y = torch.einsum('nbk,bkj->nbj', x, perm)
         return x.view(*tensor.shape[:-1], self.hidden_dim)
+
+    def _apply_x_mask(self, tensor):
+        reshaped = tensor.view(*tensor.shape[:-1], -1, 4)
+        masked = reshaped.clone()
+        masked[..., 2:4] = 0
+        return masked.view_as(tensor)
 
     def to_eval_mode(self):
         if not self._eval_mode:

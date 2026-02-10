@@ -221,7 +221,11 @@ def _apply_flatquant(model, apply_flatquant_to_model, args, trainloader, logger)
     if args.save_matrix and not args.reload_matrix:
         flat_utils.save_flat_matrices(args, model)
     flat_utils.reparameterize_model(
-        model, use_perm=args.use_perm, use_comp_mask=args.use_comp_mask
+        model,
+        use_perm=args.use_perm,
+        use_comp_mask=args.use_comp_mask,
+        use_x_perm=args.use_x_perm,
+        use_x_mask=args.use_x_mask,
     )
     logger.info("Finished reparameterize model.")
     return model
@@ -274,7 +278,11 @@ def main():
             if args.save_matrix and not args.reload_matrix:
                 flat_utils.load_flat_matrices(args, model)
             flat_utils.reparameterize_model(
-                model, use_perm=args.use_perm, use_comp_mask=args.use_comp_mask
+                model,
+                use_perm=args.use_perm,
+                use_comp_mask=args.use_comp_mask,
+                use_x_perm=args.use_x_perm,
+                use_x_mask=args.use_x_mask,
             )
             logger.info("Finished reparameterize model.")
 

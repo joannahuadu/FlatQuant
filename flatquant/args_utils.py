@@ -136,6 +136,8 @@ def parser_gen():
                         help="Enable applying learned activation permutation (x_perm) during forward/eval.")
     parser.add_argument("--soft_x_perm", action="store_true", default=False,
                         help="Enable block-wise Sinkhorn permutation on activations (post AXB).")
+    parser.add_argument("--use_x_mask", action=argparse.BooleanOptionalAction, default=False,
+                        help="Zero out channels 2:4 of each 4-wide block after x_perm.")
     parser.add_argument("--use_perm", action=argparse.BooleanOptionalAction, default=True,
                         help="Enable soft permutation during reparameterization.")
     parser.add_argument("--use_comp_mask", action=argparse.BooleanOptionalAction, default=False,
