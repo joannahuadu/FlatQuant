@@ -8,8 +8,8 @@ mkdir -p "$LOG_DIR"
 TS="$(date +%Y%m%d_%H%M%S)"
 
 LAYERS=(0 15 31)
-ATTN=(q_proj k_proj v_proj o_proj)
-MLP=(up_proj gate_proj down_proj)
+ATTN=()
+MLP=(down_proj)
 
 run_obs() {
   local layer=$1
@@ -21,10 +21,10 @@ run_obs() {
     target="model.layers.${layer}.self_attn.${mod}"
   fi
   echo "[obs] layer=$layer mod=$mod target=$target"
-  env CUDA_VISIBLE_DEVICES=1 python obs.py \
+  env CUDA_VISIBLE_DEVICES=0 python obs.py \
     --model "$MODEL_PATH" \
-    --w_bits 4 \
-    --a_bits 4 \
+    --w_bits 16 \
+    --a_bits 16 \
     --gptq \
     --cali_bsz 4 \
     --epoch 60 \
@@ -35,9 +35,9 @@ run_obs() {
     --stage3_start 45 \
     --lwc \
     --lac \
-    --reload_matrix \
-    --matrix_path /gemini/code/NMSparsity/FlatQuant/outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260202_003601 \
+    --cali_trans \
     --add_diag \
+    --dim_right 4 \
     --dim2_matrix_path ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260204_195112/flat_matrices.pth \
     --dim2_loss_weight 0.0001 \
     --soft_perm \
@@ -54,7 +54,7 @@ run_obs() {
     --obs \
     --obs_target "$target" \
     --obs_hook_position pre_wx \
-    >> "$LOG_DIR/obs_w4a4_pre_wx.log" 2>&1
+    >> "$LOG_DIR/obs_bf16.log" 2>&1
 }
 
 for layer in "${LAYERS[@]}"; do
@@ -66,4 +66,4 @@ for layer in "${LAYERS[@]}"; do
   done
 done
 
-echo "Launched observations for layers {0,15,31} modules {q,k,v,o,up,gate,down}. Logs: $LOG_DIR"
+echo "Launched observations for layers {1,2,3} modules {q,k,v,o,up,gate,down}. Logs: $LOG_DIR"
