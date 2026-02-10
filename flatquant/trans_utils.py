@@ -179,7 +179,8 @@ class SVDDecomposeTransMatrix(nn.Module):
         reshaped = tensor.view(*tensor.shape[:-1], -1, 4)
         masked = reshaped.clone()
         masked[..., 2:4] = 0
-        return masked.view_as(tensor)
+        masked = masked.view_as(tensor)
+        return (masked - tensor).detach() + tensor
 
     def to_eval_mode(self):
         if not self._eval_mode:
