@@ -20,12 +20,38 @@ nohup env CUDA_VISIBLE_DEVICES=2 python main.py \
   --cali_trans \
   --add_diag \
   --dim_right 4 \
+  --no-use_perm \
+  --no-use_comp_mask \
   --output_dir ./outputs \
   --save_matrix \
   --lm_eval \
   --tasks winogrande openbookqa mmlu arc_challenge \
   --lm_eval_batch_size 16 \
   >> "$LOG_DIR/eval_w4a4_dim_right=4.log" 2>&1 &
+
+sleep 30
+
+nohup env CUDA_VISIBLE_DEVICES=3 python main.py \
+  --model "$MODEL_PATH" \
+  --w_bits 4 \
+  --a_bits 4 \
+  --gptq \
+  --cali_bsz 4 \
+  --epoch 15 \
+  --flat_lr 5e-3 \
+  --lwc \
+  --lac \
+  --cali_trans \
+  --add_diag \
+  --dim_right 2 \
+  --no-use_perm \
+  --no-use_comp_mask \
+  --output_dir ./outputs \
+  --save_matrix \
+  --lm_eval \
+  --tasks winogrande openbookqa mmlu arc_challenge \
+  --lm_eval_batch_size 16 \
+  >> "$LOG_DIR/eval_w4a4_dim_right=2.log" 2>&1 &
 
 
 # nohup env CUDA_VISIBLE_DEVICES=1 python main.py \

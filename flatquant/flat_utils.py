@@ -36,7 +36,7 @@ def reparameterize_ln(ln, trans):
     trans.use_diag = False
 
 
-def reparameterize_model(model, use_x_perm=True, use_perm=True, use_comp_mask=False, use_x_mask=False):
+def reparameterize_model(model, use_x_perm=False, use_perm=False, use_comp_mask=False, use_x_mask=False):
     for idx in range(model.config.num_hidden_layers):
         layer = model.model.layers[idx]
         if layer.self_attn.ln_trans is not None:

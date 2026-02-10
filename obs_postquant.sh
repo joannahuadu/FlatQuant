@@ -21,7 +21,7 @@ run_obs() {
     target="model.layers.${layer}.self_attn.${mod}"
   fi
   echo "[obs] layer=$layer mod=$mod target=$target"
-  env CUDA_VISIBLE_DEVICES=1 python obs.py \
+  env CUDA_VISIBLE_DEVICES=2 python obs.py \
     --model "$MODEL_PATH" \
     --w_bits 4 \
     --a_bits 4 \
@@ -53,8 +53,8 @@ run_obs() {
     --lm_eval_batch_size 16 \
     --obs \
     --obs_target "$target" \
-    --obs_hook_position pre_wx \
-    >> "$LOG_DIR/obs_w4a4_pre_wx.log" 2>&1
+    --obs_hook_position post_quant \
+    >> "$LOG_DIR/obs_w4a4_post_quant.log" 2>&1
 }
 
 for layer in "${LAYERS[@]}"; do
