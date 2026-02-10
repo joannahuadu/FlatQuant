@@ -89,7 +89,7 @@ def save_flat_matrices(args, model, rank=None):
         layer = model.model.layers[i]
         layer.self_attn.rep_matrix_only()
         layer.mlp.rep_matrix_only()
-        paras_name = ["trans.matrix", "trans.diag_scale", "trans.perm_logits", "clip_factor_w", "clip_factor_a"]
+        paras_name = ["trans.matrix", "trans.diag_scale", "trans.perm_logits", "trans.x_perm_logits", "clip_factor_w", "clip_factor_a"]
         flat_matrices[i] = get_paras_dict_by_name(layer, required_names=paras_name)
     if rank is not None:
         matrices_path = os.path.join(args.exp_dir, f"flat_matrices_{rank}.pth")
