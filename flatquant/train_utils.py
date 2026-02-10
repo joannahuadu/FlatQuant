@@ -242,6 +242,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 ("mlp.down_trans", layer.mlp.down_trans),
             ):
                 trans.use_x_perm = True
+                trans.use_x_mask = False
                 perm_logits[name] = trans.x_perm_logits
             perm_logits_by_layer[i] = perm_logits
         elif args.soft_perm and target_layer is not None:
