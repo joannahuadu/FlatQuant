@@ -136,6 +136,12 @@ def parser_gen():
                         help="Enable applying learned activation permutation (x_perm) during forward/eval.")
     parser.add_argument("--soft_x_perm", action="store_true", default=False,
                         help="Enable block-wise Sinkhorn permutation on activations (post AXB).")
+    parser.add_argument("--use_x_perm_predictor", action=argparse.BooleanOptionalAction, default=False,
+                        help="Predict per-token block-wise permutation logits instead of using shared logits.")
+    parser.add_argument("--x_perm_num_clusters", type=int, default=4,
+                        help="Number of shared permutation clusters for the x_perm predictor.")
+    parser.add_argument("--x_perm_pred_hidden", type=int, default=128,
+                        help="Hidden size of the x_perm predictor MLP.")
     parser.add_argument("--use_x_mask", action=argparse.BooleanOptionalAction, default=False,
                         help="Zero out channels 2:4 of each 4-wide block after x_perm.")
     parser.add_argument("--use_perm", action=argparse.BooleanOptionalAction, default=True,

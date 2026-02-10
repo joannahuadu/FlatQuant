@@ -13,6 +13,35 @@ def _sinkhorn(logits, n_iters=10):
     return torch.softmax(log_p, dim=-1)
 
 
+class _XPermPredictor(nn.Module):
+    """Predicts per-token block-wise permutation logits via cluster mixture."""
+
+    def __init__(self, hidden_dim, num_blocks, block_size, num_clusters=4, hidden_size=128):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_blocks = num_blocks
+        self.block_size = block_size
+        self.num_clusters = num_clusters
+        self.gate = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, num_clusters),
+        )
+        self.cluster_logits = nn.Parameter(
+            torch.randn(num_clusters, num_blocks, block_size, block_size, dtype=torch.float32) * 0.01,
+            requires_grad=True,
+        )
+
+    def forward(self, tensor):
+        orig_shape = tensor.shape
+        x = tensor.view(-1, self.hidden_dim)  # flatten tokens
+        gate = torch.softmax(self.gate(x), dim=-1)  # (B_tokens, K)
+        logits = torch.einsum('bk,knij->bnij', gate, self.cluster_logits)
+        logits = logits.view(*orig_shape[:-1], self.num_blocks, self.block_size, self.block_size)
+        gate = gate.view(*orig_shape[:-1], self.num_clusters)
+        return logits, gate
+
+
 # ---------- transformation version of singular value decomposition ----------
 class SVDSingleTransMatrix(nn.Module):
     def __init__(self, size):
@@ -65,7 +94,17 @@ class SVDSingleTransMatrix(nn.Module):
 
 
 class SVDDecomposeTransMatrix(nn.Module):
-    def __init__(self, left_size, right_size, add_diag=False, diag_init_para=None):
+    def __init__(
+        self,
+        left_size,
+        right_size,
+        add_diag=False,
+        diag_init_para=None,
+        use_x_mask=False,
+        use_x_perm_predictor=False,
+        x_perm_num_clusters=4,
+        x_perm_pred_hidden=128,
+    ):
         super(SVDDecomposeTransMatrix, self).__init__()
         self.linear_u_left = nn.Linear(left_size, left_size, bias=False, dtype=torch.float32)
         self.linear_u_left.weight.data = get_init_weight(left_size).to(self.linear_u_left.weight)
@@ -94,6 +133,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         self._last_p_soft = None
         self._last_perm_right = None
         self._last_x_p_soft = None
+        self._last_x_gate = None
         self.use_x_perm = False
         self.block_size = 64
         self.hidden_dim = left_size * right_size
@@ -104,6 +144,15 @@ class SVDDecomposeTransMatrix(nn.Module):
         )
         self.x_perm_temp = 0.01
         self.x_perm_iters = 10
+        self.use_x_perm_predictor = False
+        self.x_perm_predictor = None
+        if self.use_x_perm_predictor:
+            self._build_x_perm_predictor(
+                num_blocks=num_blocks,
+                block_size=self.block_size,
+                num_clusters=x_perm_num_clusters,
+                hidden_size=x_perm_pred_hidden,
+            )
 
         self.add_diag = add_diag
         self.use_diag = True
@@ -168,12 +217,30 @@ class SVDDecomposeTransMatrix(nn.Module):
         return permuted
 
     def _apply_x_perm(self, tensor):
-        x_perm_logits = self.x_perm_logits.to(tensor)
+        if self.use_x_perm_predictor and self.x_perm_predictor is not None:
+            logits, gate = self.x_perm_predictor(tensor)
+            self._last_x_gate = gate
+            x_perm_logits = logits.to(tensor)
+        else:
+            x_perm_logits = self.x_perm_logits.to(tensor)
+            self._last_x_gate = None
         perm = _sinkhorn(x_perm_logits / self.x_perm_temp, n_iters=self.x_perm_iters)
         self._last_x_p_soft = perm
-        x = tensor.view(-1, perm.shape[0], self.block_size)
-        y = torch.einsum('nbk,bkj->nbj', x, perm)
-        return x.view(*tensor.shape[:-1], self.hidden_dim)
+        x = tensor.view(-1, perm.shape[-3], self.block_size)
+        if perm.dim() == 3:
+            y = torch.einsum('nbk,bkj->nbj', x, perm)
+        else:
+            y = torch.einsum('nbk,nbkj->nbj', x, perm)
+        return y.view(*tensor.shape[:-1], self.hidden_dim)
+
+    def _build_x_perm_predictor(self, num_blocks, block_size, num_clusters=4, hidden_size=128):
+        self.x_perm_predictor = _XPermPredictor(
+            hidden_dim=self.hidden_dim,
+            num_blocks=num_blocks,
+            block_size=block_size,
+            num_clusters=num_clusters,
+            hidden_size=hidden_size,
+        )
 
     def _apply_x_mask(self, tensor):
         reshaped = tensor.view(*tensor.shape[:-1], -1, 4)

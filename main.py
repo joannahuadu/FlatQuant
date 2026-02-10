@@ -74,6 +74,9 @@ def main():
             use_perm=args.use_perm,
             use_comp_mask=args.use_comp_mask,
             use_x_mask=args.use_x_mask,
+            use_x_perm_predictor=args.use_x_perm_predictor,
+            x_perm_num_clusters=args.x_perm_num_clusters,
+            x_perm_pred_hidden=args.x_perm_pred_hidden,
         )
         logger.info("Finished reparameterize model.")
 

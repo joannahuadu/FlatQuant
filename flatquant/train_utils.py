@@ -236,6 +236,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         if args.soft_x_perm:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.x_perm_logits", ]), "lr": args.flat_lr})
             paras_name.append("trans.x_perm_logits")
+            predictor_params = []
             for name, trans in (
                 ("self_attn.ln_trans", layer.self_attn.ln_trans),
                 ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
@@ -243,8 +244,22 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             ):
                 trans.use_x_perm = True
                 trans.use_x_mask = False
+                trans.use_x_perm_predictor = args.use_x_perm_predictor
+                if trans.use_x_perm_predictor and trans.x_perm_predictor is None:
+                    num_blocks = trans.hidden_dim // trans.block_size
+                    trans._build_x_perm_predictor(
+                        num_blocks=num_blocks,
+                        block_size=trans.block_size,
+                        num_clusters=args.x_perm_num_clusters,
+                        hidden_size=args.x_perm_pred_hidden,
+                    )
+                if trans.use_x_perm_predictor and trans.x_perm_predictor is not None:
+                    predictor_params += list(trans.x_perm_predictor.parameters())
                 perm_logits[name] = trans.x_perm_logits
             perm_logits_by_layer[i] = perm_logits
+            if len(predictor_params) > 0:
+                trained_params.append({"params": predictor_params, "lr": args.flat_lr})
+                paras_name.append("trans.x_perm_predictor")
         elif args.soft_perm and target_layer is not None:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.perm_logits", ]), "lr": args.flat_lr})
             paras_name.append("trans.perm_logits")
