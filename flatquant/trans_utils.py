@@ -136,7 +136,7 @@ class SVDDecomposeTransMatrix(nn.Module):
             )
             if self.use_x_perm and self.x_perm_logits is not None:
                 out = self._apply_x_perm(out)
-                if self.use_x_mask:
+                if self.use_x_mask and not inv_t:
                     out = self._apply_x_mask(out)
             return out
         matrix_left, matrix_right = matrix_u_left @ torch.diag(linear_diag_left) @ matrix_v_left.t(), matrix_u_right @ torch.diag(linear_diag_right) @ matrix_v_right.t()
@@ -147,7 +147,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         )
         if self.use_x_perm and self.x_perm_logits is not None:
             out = self._apply_x_perm(out)
-            if self.use_x_mask:
+            if self.use_x_mask and not inv_t:
                 out = self._apply_x_mask(out)
         return out
 
