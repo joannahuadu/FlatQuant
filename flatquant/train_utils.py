@@ -233,8 +233,6 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         set_require_grad_all(layer, False)
         trained_params, paras_name = [], []
         perm_logits = {}
-        orth_params = []
-        orth_clip_norm = 1.0
         if args.soft_x_perm:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.x_perm_logits", ]), "lr": args.flat_lr})
             paras_name.append("trans.x_perm_logits")
@@ -303,11 +301,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         # cache trans outputs
         pre_trans_cache = {}
         hooks = []
-        for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
-            for attr in ("linear_u_left", "linear_v_left", "linear_u_right", "linear_v_right"):
-                mod = getattr(trans, attr, None)
-                p_list = mod.parametrizations.weight
-                orth_params.append(p_list.original)
+
         def _cache_output(name):
             def _hook(_mod, _inp, out):
                 if out is None or name in pre_trans_cache:
@@ -508,8 +502,6 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     loss = loss / loss.clone().detach()
                     optimizer.zero_grad()
                     loss.backward()
-                    if orth_params:
-                        torch.nn.utils.clip_grad_norm_(orth_params, max_norm=orth_clip_norm)
                     optimizer.step()
                     scheduler.step()
             cur_lr = optimizer.state_dict()['param_groups'][0]['lr']
