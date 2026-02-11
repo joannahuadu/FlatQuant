@@ -16,12 +16,23 @@ def _sinkhorn(logits, n_iters=10):
 class _XPermPredictor(nn.Module):
     """Predicts per-token block-wise permutation logits via cluster mixture."""
 
-    def __init__(self, hidden_dim, num_blocks, block_size, num_clusters=4, hidden_size=128):
+    def __init__(
+        self,
+        hidden_dim,
+        num_blocks,
+        block_size,
+        num_clusters=4,
+        hidden_size=128,
+        num_buckets=256,
+        kmeans_iters=5,
+    ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_blocks = num_blocks
         self.block_size = block_size
         self.num_clusters = num_clusters
+        self.num_buckets = num_buckets
+        self.kmeans_iters = kmeans_iters
         self.gate = nn.Sequential(
             nn.Linear(hidden_dim, hidden_size),
             nn.GELU(),
@@ -33,13 +44,23 @@ class _XPermPredictor(nn.Module):
             requires_grad=True,
         )
 
-    def forward(self, tensor):
+    def forward(self, tensor, return_bucketed=False):
         orig_shape = tensor.shape
-        x = tensor.view(-1, self.hidden_dim)  # flatten tokens
-        gate = torch.softmax(self.gate(x), dim=-1)  # (B_tokens, K)
-        logits = torch.einsum('bk,knij->bnij', gate, self.cluster_logits)
-        logits = logits.view(*orig_shape[:-1], self.num_blocks, self.block_size, self.block_size)
+        x = tensor.view(-1, self.hidden_dim)
+        gate = torch.softmax(self.gate(x), dim=-1)
         gate = gate.view(*orig_shape[:-1], self.num_clusters)
+        if return_bucketed:
+            gate_flat = gate.view(-1, self.num_clusters)
+            cluster_ids, m = self._kmeans_assign(gate_flat.detach())
+            bucket_gate = gate_flat.new_zeros((m, gate_flat.size(-1)))
+            counts = gate_flat.new_zeros((m, 1))
+            bucket_gate.index_add_(0, cluster_ids, gate_flat)
+            counts.index_add_(0, cluster_ids, gate_flat.new_ones((gate_flat.size(0), 1)))
+            bucket_gate = bucket_gate / counts.clamp_min(1.0)
+            bucket_logits = torch.einsum('mk,knij->mnij', bucket_gate, self.cluster_logits)
+            return bucket_logits, cluster_ids, gate
+        logits = torch.einsum('bk,knij->bnij', gate.view(-1, self.num_clusters), self.cluster_logits)
+        logits = logits.view(*orig_shape[:-1], self.num_blocks, self.block_size, self.block_size)
         return logits, gate
 
     def _init_gate(self):
@@ -48,6 +69,27 @@ class _XPermPredictor(nn.Module):
                 nn.init.trunc_normal_(m.weight, std=0.02)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+
+    def _kmeans_assign(self, gate_flat):
+        n, _ = gate_flat.shape
+        m = min(self.num_buckets, n)
+        if m <= 1:
+            return gate_flat.new_zeros((n,), dtype=torch.long), 1
+        with torch.no_grad():
+            perm = torch.randperm(n, device=gate_flat.device)
+            centers = gate_flat[perm[:m]].clone()
+            for _ in range(self.kmeans_iters):
+                x2 = (gate_flat ** 2).sum(dim=1, keepdim=True)
+                c2 = (centers ** 2).sum(dim=1).unsqueeze(0)
+                dists = x2 + c2 - 2.0 * gate_flat @ centers.t()
+                cluster_ids = torch.argmin(dists, dim=1)
+                for idx in range(m):
+                    mask = cluster_ids == idx
+                    if mask.any():
+                        centers[idx] = gate_flat[mask].mean(dim=0)
+                    else:
+                        centers[idx] = gate_flat[torch.randint(0, n, (1,), device=gate_flat.device)].squeeze(0)
+        return cluster_ids, m
 
 
 # ---------- transformation version of singular value decomposition ----------
@@ -110,6 +152,8 @@ class SVDDecomposeTransMatrix(nn.Module):
         diag_init_para=None,
         x_perm_num_clusters=4,
         x_perm_pred_hidden=128,
+        x_perm_num_buckets=256,
+        x_perm_kmeans_iters=5,
     ):
         super(SVDDecomposeTransMatrix, self).__init__()
         self.linear_u_left = nn.Linear(left_size, left_size, bias=False, dtype=torch.float32)
@@ -139,7 +183,6 @@ class SVDDecomposeTransMatrix(nn.Module):
         self._last_p_soft = None
         self._last_perm_right = None
         self._last_x_p_soft = None
-        self._last_x_gate = None
         self.use_x_perm = False
         self.block_size = 64
         self.hidden_dim = left_size * right_size
@@ -152,6 +195,8 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.x_perm_iters = 10
         self.use_x_perm_predictor = False
         self.x_perm_predictor = None
+        self.x_perm_num_buckets = x_perm_num_buckets
+        self.x_perm_kmeans_iters = x_perm_kmeans_iters
         if self.use_x_perm_predictor:
             self._build_x_perm_predictor(
                 num_blocks=num_blocks,
@@ -225,9 +270,19 @@ class SVDDecomposeTransMatrix(nn.Module):
 
     def _apply_x_perm(self, tensor):
         if self.use_x_perm_predictor and self.x_perm_predictor is not None:
-            logits, gate = self.x_perm_predictor(tensor)
-            self._last_x_gate = gate
-            x_perm_logits = logits.to(tensor)
+            bucket_logits, cluster_ids, gate = self.x_perm_predictor(tensor, return_bucketed=True)
+            perm = self._sinkhorn_chunked(bucket_logits.to(tensor))
+            self._last_x_p_soft = perm
+            x = tensor.view(-1, perm.shape[-3], self.block_size)
+            y = torch.empty_like(x)
+            for k in range(perm.shape[0]):
+                idx = (cluster_ids == k).nonzero(as_tuple=False).squeeze(-1)
+                if idx.numel() == 0:
+                    continue
+                x_k = x.index_select(0, idx)
+                y_k = torch.einsum('nbk,bkj->nbj', x_k, perm[k])
+                y.index_copy_(0, idx, y_k)
+            return y.view(*tensor.shape[:-1], self.hidden_dim)
         else:
             x_perm_logits = self.x_perm_logits.to(tensor)
             self._last_x_gate = None
@@ -254,6 +309,8 @@ class SVDDecomposeTransMatrix(nn.Module):
             block_size=block_size,
             num_clusters=num_clusters,
             hidden_size=hidden_size,
+            num_buckets=self.x_perm_num_buckets,
+            kmeans_iters=self.x_perm_kmeans_iters,
         )
 
     def _apply_x_mask(self, tensor):
