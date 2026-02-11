@@ -152,7 +152,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         diag_init_para=None,
         x_perm_num_clusters=4,
         x_perm_pred_hidden=128,
-        x_perm_num_buckets=256,
+        x_perm_num_buckets=64,
         x_perm_kmeans_iters=5,
     ):
         super(SVDDecomposeTransMatrix, self).__init__()
@@ -288,7 +288,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         self._last_x_p_soft = perm.view_as(x_perm_logits)
         x = tensor.view(-1, perm.shape[-3], self.block_size)
         y = torch.einsum('nbk,nbkj->nbj', x, perm)
-        return y.view(*tensor.shape[:-1], self.hidden_dim)
+        return y.contiguous().view(*tensor.shape[:-1], self.hidden_dim)
 
     def _sinkhorn_chunked(self, logits):
         """Apply sinkhorn in manageable chunks to avoid OOM on large batches."""
