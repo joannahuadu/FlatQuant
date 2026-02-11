@@ -100,8 +100,6 @@ class SVDDecomposeTransMatrix(nn.Module):
         right_size,
         add_diag=False,
         diag_init_para=None,
-        use_x_mask=False,
-        use_x_perm_predictor=False,
         x_perm_num_clusters=4,
         x_perm_pred_hidden=128,
     ):
