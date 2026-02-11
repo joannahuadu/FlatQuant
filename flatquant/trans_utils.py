@@ -27,6 +27,7 @@ class _XPermPredictor(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_size, num_clusters),
         )
+        self._init_gate()
         self.cluster_logits = nn.Parameter(
             torch.randn(num_clusters, num_blocks, block_size, block_size, dtype=torch.float32) * 0.01,
             requires_grad=True,
@@ -40,6 +41,13 @@ class _XPermPredictor(nn.Module):
         logits = logits.view(*orig_shape[:-1], self.num_blocks, self.block_size, self.block_size)
         gate = gate.view(*orig_shape[:-1], self.num_clusters)
         return logits, gate
+
+    def _init_gate(self):
+        for m in self.gate:
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
 
 # ---------- transformation version of singular value decomposition ----------
