@@ -58,10 +58,10 @@ class _XPermPredictor(nn.Module):
             counts.index_add_(0, cluster_ids, gate_flat.new_ones((gate_flat.size(0), 1)))
             bucket_gate = bucket_gate / counts.clamp_min(1.0)
             bucket_logits = torch.einsum('mk,knij->mnij', bucket_gate, self.cluster_logits)
-            return bucket_logits, cluster_ids, gate
+            return bucket_logits, cluster_ids
         logits = torch.einsum('bk,knij->bnij', gate.view(-1, self.num_clusters), self.cluster_logits)
         logits = logits.view(*orig_shape[:-1], self.num_blocks, self.block_size, self.block_size)
-        return logits, gate
+        return logits
 
     def _init_gate(self):
         for m in self.gate:
@@ -236,7 +236,7 @@ class SVDDecomposeTransMatrix(nn.Module):
                 inp, matrix_left.to(inp), matrix_right.to(inp), comp_mask=self.use_comp_mask
             )
             if self.use_x_perm and self.x_perm_logits is not None:
-                out = self._apply_x_perm(out)
+                out = self._apply_x_perm(out, use_predictor=not inv_t)
                 if self.use_x_mask and not inv_t:
                     out = self._apply_x_mask(out)
             return out
@@ -247,7 +247,7 @@ class SVDDecomposeTransMatrix(nn.Module):
             inp, matrix_left.to(inp), matrix_right.to(inp), comp_mask=self.use_comp_mask
         )
         if self.use_x_perm and self.x_perm_logits is not None:
-            out = self._apply_x_perm(out)
+            out = self._apply_x_perm(out, use_predictor=not inv_t)
             if self.use_x_mask and not inv_t:
                 out = self._apply_x_mask(out)
         return out
@@ -268,8 +268,8 @@ class SVDDecomposeTransMatrix(nn.Module):
         self._last_perm_right = permuted
         return permuted
 
-    def _apply_x_perm(self, tensor):
-        if self.use_x_perm_predictor and self.x_perm_predictor is not None:
+    def _apply_x_perm(self, tensor, use_predictor=True):
+        if use_predictor and self.use_x_perm_predictor and self.x_perm_predictor is not None:
             bucket_logits, cluster_ids, gate = self.x_perm_predictor(tensor, return_bucketed=True)
             perm = self._sinkhorn_chunked(bucket_logits.to(tensor))
             self._last_x_p_soft = perm
@@ -283,9 +283,7 @@ class SVDDecomposeTransMatrix(nn.Module):
                 y_k = torch.einsum('nbk,bkj->nbj', x_k, perm[k])
                 y.index_copy_(0, idx, y_k)
             return y.view(*tensor.shape[:-1], self.hidden_dim)
-        else:
-            x_perm_logits = self.x_perm_logits.to(tensor)
-            self._last_x_gate = None
+        x_perm_logits = self.x_perm_logits.to(tensor)
         perm = self._sinkhorn_chunked(x_perm_logits.view(-1, *x_perm_logits.shape[-3:]))
         self._last_x_p_soft = perm.view_as(x_perm_logits)
         x = tensor.view(-1, perm.shape[-3], self.block_size)
