@@ -151,6 +151,7 @@ class SVDDecomposeTransMatrix(nn.Module):
                 num_clusters=x_perm_num_clusters,
                 hidden_size=x_perm_pred_hidden,
             )
+        self.x_perm_chunk_size = 256
 
         self.add_diag = add_diag
         self.use_diag = True
@@ -222,14 +223,21 @@ class SVDDecomposeTransMatrix(nn.Module):
         else:
             x_perm_logits = self.x_perm_logits.to(tensor)
             self._last_x_gate = None
-        perm = _sinkhorn(x_perm_logits / self.x_perm_temp, n_iters=self.x_perm_iters)
-        self._last_x_p_soft = perm
+        perm = self._sinkhorn_chunked(x_perm_logits.view(-1, *x_perm_logits.shape[-3:]))
+        self._last_x_p_soft = perm.view_as(x_perm_logits)
         x = tensor.view(-1, perm.shape[-3], self.block_size)
-        if perm.dim() == 3:
-            y = torch.einsum('nbk,bkj->nbj', x, perm)
-        else:
-            y = torch.einsum('nbk,nbkj->nbj', x, perm)
+        y = torch.einsum('nbk,nbkj->nbj', x, perm)
         return y.view(*tensor.shape[:-1], self.hidden_dim)
+
+    def _sinkhorn_chunked(self, logits):
+        """Apply sinkhorn in manageable chunks to avoid OOM on large batches."""
+        if logits.dim() <= 3:
+            return _sinkhorn(logits / self.x_perm_temp, n_iters=self.x_perm_iters)
+        chunk = self.x_perm_chunk_size
+        outs = []
+        for i in range(0, logits.size(0), chunk):
+            outs.append(_sinkhorn(logits[i:i + chunk] / self.x_perm_temp, n_iters=self.x_perm_iters))
+        return torch.cat(outs, dim=0)
 
     def _build_x_perm_predictor(self, num_blocks, block_size, num_clusters=4, hidden_size=128):
         self.x_perm_predictor = _XPermPredictor(

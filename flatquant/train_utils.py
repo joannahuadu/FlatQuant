@@ -253,6 +253,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                         num_clusters=args.x_perm_num_clusters,
                         hidden_size=args.x_perm_pred_hidden,
                     )
+                    trans.x_perm_predictor = trans.x_perm_predictor.to(dev)
                 if trans.use_x_perm_predictor and trans.x_perm_predictor is not None:
                     predictor_params += list(trans.x_perm_predictor.parameters())
                 perm_logits[name] = trans.x_perm_logits
