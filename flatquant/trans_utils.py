@@ -183,6 +183,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         self._last_p_soft = None
         self._last_perm_right = None
         self._last_x_p_soft = None
+        self._last_x_perm_applied = False
         self.use_x_perm = False
         self.block_size = 64
         self.hidden_dim = left_size * right_size
@@ -237,7 +238,7 @@ class SVDDecomposeTransMatrix(nn.Module):
             )
             if self.use_x_perm and self.x_perm_logits is not None:
                 out = self._apply_x_perm(out, use_predictor=not inv_t, eval=self._eval_mode)
-                if self.use_x_mask and not inv_t:
+                if self.use_x_mask and not inv_t and self._last_x_perm_applied:
                     out = self._apply_x_mask(out)
             return out
         matrix_left, matrix_right = matrix_u_left @ torch.diag(linear_diag_left) @ matrix_v_left.t(), matrix_u_right @ torch.diag(linear_diag_right) @ matrix_v_right.t()
@@ -248,7 +249,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         )
         if self.use_x_perm and self.x_perm_logits is not None:
             out = self._apply_x_perm(out, use_predictor=not inv_t, eval=self._eval_mode)
-            if self.use_x_mask and not inv_t:
+            if self.use_x_mask and not inv_t and self._last_x_perm_applied:
                 out = self._apply_x_mask(out)
         return out
 
@@ -269,12 +270,15 @@ class SVDDecomposeTransMatrix(nn.Module):
         return permuted
 
     def _apply_x_perm(self, tensor, use_predictor=True, eval=False):
+        self._last_x_perm_applied = False
         if use_predictor and self.use_x_perm_predictor and self.x_perm_predictor is not None:
             bucket_logits, cluster_ids = self.x_perm_predictor(tensor, return_bucketed=True)
             perm = self._sinkhorn_chunked(bucket_logits.to(tensor))
             if perm.max().item() < 0.99 and eval:
+                self._last_x_p_soft = None
                 return tensor
             self._last_x_p_soft = perm
+            self._last_x_perm_applied = True
             x = tensor.view(-1, perm.shape[-3], self.block_size)
             y = torch.empty_like(x)
             for k in range(perm.shape[0]):
@@ -288,8 +292,10 @@ class SVDDecomposeTransMatrix(nn.Module):
         x_perm_logits = self.x_perm_logits.to(tensor)
         perm = self._sinkhorn_chunked(x_perm_logits.view(-1, *x_perm_logits.shape[-3:]))
         if perm.max().item() < 0.99 and eval:
+            self._last_x_p_soft = None
             return tensor
         self._last_p_soft = perm.view_as(x_perm_logits)
+        self._last_x_perm_applied = True
         x = tensor.view(-1, perm.shape[-3], self.block_size)
         y = torch.einsum('nbk,nbkj->nbj', x, perm)
         return y.contiguous().view(*tensor.shape[:-1], self.hidden_dim)
