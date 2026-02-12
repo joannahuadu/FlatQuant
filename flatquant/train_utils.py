@@ -286,18 +286,17 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["clip_factor_a", ]), "lr": args.flat_lr * 10})
             paras_name.append("clip_factor_a")
 
-        optimizer = torch.optim.AdamW(trained_params)
         steps_per_epoch = max(1, args.nsamples // args.cali_bsz)
         tmax = max(1, int(args.epochs * steps_per_epoch * args.flat_lr_tmax_mult))
         eta_min = args.flat_lr * args.flat_lr_min_ratio
-        scheduler_main = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=tmax, eta_min=eta_min
-        )
-        if args.warmup:
-            scheduler_warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=16)
-            scheduler = torch.optim.lr_scheduler.ChainedScheduler([scheduler_warmup, scheduler_main])
-        else:
-            scheduler = scheduler_main
+        def _build_scheduler(optim):
+            scheduler_main = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optim, T_max=tmax, eta_min=eta_min
+            )
+            if args.warmup:
+                scheduler_warmup = torch.optim.lr_scheduler.LinearLR(optim, start_factor=0.01, total_iters=16)
+                return torch.optim.lr_scheduler.ChainedScheduler([scheduler_warmup, scheduler_main])
+            return scheduler_main
         # cache trans outputs
         pre_trans_cache = {}
         hooks = []
@@ -351,185 +350,229 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     optim.state.pop(p, None)
             optim.param_groups = keep_groups
             return optim
+        def _reset_optim_and_scheduler():
+            optim = torch.optim.AdamW(trained_params)
+            optim = _prune_frozen_param_groups(optim)
+            if len(optim.param_groups) == 0:
+                return optim, None
+            return optim, _build_scheduler(optim)
         def _save_stage_ckpt(tag):
             ckpt = dict(flat_parameters)
             ckpt[i] = get_paras_dict_by_name(layer, required_names=paras_name)
             path = os.path.join(args.exp_dir, f"flat_parameters_{tag}.pth")
             torch.save(ckpt, path)
             logger.info(f"saved stage checkpoint: {path}")
+        def _freeze_x_perm_params():
+            for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
+                x_perm_logits = getattr(trans, "x_perm_logits", None)
+                if x_perm_logits is not None:
+                    x_perm_logits.requires_grad_(False)
+                x_perm_predictor = getattr(trans, "x_perm_predictor", None)
+                if x_perm_predictor is not None:
+                    for p in x_perm_predictor.parameters():
+                        p.requires_grad_(False)
 
-        nan_in_grad = False
-        for epoch in range(args.epochs):
-            mse = 0
-            start_tick = time.time()
-            # -------- stage scheduling --------
-            if args.use_stage2 and args.stage2_start is not None and epoch == args.stage2_start:
-                _save_stage_ckpt("stage1")
-                for p in perm_logits.values():
-                    p.requires_grad_(False)
-                args.dim2_loss_weight = 0.0
-                optimizer = _prune_frozen_param_groups(optimizer)
-            if args.use_stage3 and args.stage3_start is not None and epoch == args.stage3_start:
-                _save_stage_ckpt("stage2")
-                for name, param in layer.named_parameters():
-                    if "right" in name:
-                        param.requires_grad = False
-                for p in perm_logits.values():
-                    p.requires_grad_(False)
-                args.dim2_loss_weight = 0.0
-                args.comp_zero_weight = 0.0
-                args.nm_zero_weight = 0.0
-                optimizer = _prune_frozen_param_groups(optimizer)
-                if args.stage3_lr is not None:
-                    for g in optimizer.param_groups:
-                        g["lr"] = args.stage3_lr
-            with traincast():
-                for j in range(args.nsamples // args.cali_bsz):
-                    index = j * args.cali_bsz
-                    pre_trans_cache.clear()
-                    quant_out = layer(fp_inps[index:index+args.cali_bsz,], attention_mask=attention_mask_batch, position_ids=position_ids)[0]
-                    loss = loss_func(fp_outs[index:index+args.cali_bsz,], quant_out)
-                    if target_layer is not None and args.dim2_loss_weight > 0:
-                        align_loss = 0.0
-                        for name, trans in (
-                            ("self_attn.ln_trans", layer.self_attn.ln_trans),
-                            ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
-                            ("mlp.down_trans", layer.mlp.down_trans),
-                        ):
-                            target_right = _find_target_matrix_right(target_layer, name)
-                            cur_right = _get_right_matrix(trans)
-                            if cur_right.shape == (4, 4) and target_right.shape == (2, 2):
-                                if args.soft_perm and name in perm_logits:
-                                    cur_block = trans._last_perm_right[:2, :2]
-                                    p_soft = trans._last_p_soft
-                                    if args.soft_perm_reg > 0:
-                                        reg = (p_soft * (1.0 - p_soft)).mean()
-                                        align_loss = align_loss + args.soft_perm_reg * reg
-                                else:
-                                    cur_block = _best_perm_main_block(cur_right, target_right)
-                                tgt_block = target_right
-                            else:
-                                logger.warning(
-                                    f"skip dim_right align for {name}: cur {tuple(cur_right.shape)} "
-                                    f"target {tuple(target_right.shape)}"
-                                )
-                                continue
-                            align_loss = align_loss + loss_func(
-                                cur_block.float(), tgt_block.to(cur_block.device, dtype=cur_block.dtype).float()
-                            )
-                            if name in target_left_svals:
-                                cur_svals = _get_left_svals(trans)
-                                if cur_svals is not None:
-                                    tgt_svals = target_left_svals[name].to(
-                                        cur_svals.device, dtype=cur_svals.dtype
-                                    )
-                                    if cur_svals.numel() >= tgt_svals.numel():
-                                        cur_svals = cur_svals[:tgt_svals.numel()]
+        layer_state_before = {
+            k: (v.detach().cpu() if torch.is_tensor(v) else v)
+            for k, v in layer.state_dict().items()
+        }
+        optimizer, scheduler = _reset_optim_and_scheduler()
+
+        nan_retried = False
+        while True:
+            nan_in_grad = False
+            for epoch in range(args.epochs):
+                mse = 0
+                start_tick = time.time()
+                # -------- stage scheduling --------
+                if args.use_stage2 and args.stage2_start is not None and epoch == args.stage2_start:
+                    _save_stage_ckpt("stage1")
+                    for p in perm_logits.values():
+                        p.requires_grad_(False)
+                    args.dim2_loss_weight = 0.0
+                    optimizer = _prune_frozen_param_groups(optimizer)
+                if args.use_stage3 and args.stage3_start is not None and epoch == args.stage3_start:
+                    _save_stage_ckpt("stage2")
+                    for name, param in layer.named_parameters():
+                        if "right" in name:
+                            param.requires_grad = False
+                    for p in perm_logits.values():
+                        p.requires_grad_(False)
+                    args.dim2_loss_weight = 0.0
+                    args.comp_zero_weight = 0.0
+                    args.nm_zero_weight = 0.0
+                    optimizer = _prune_frozen_param_groups(optimizer)
+                    if args.stage3_lr is not None:
+                        for g in optimizer.param_groups:
+                            g["lr"] = args.stage3_lr
+                with traincast():
+                    for j in range(args.nsamples // args.cali_bsz):
+                        index = j * args.cali_bsz
+                        pre_trans_cache.clear()
+                        quant_out = layer(fp_inps[index:index+args.cali_bsz,], attention_mask=attention_mask_batch, position_ids=position_ids)[0]
+                        loss = loss_func(fp_outs[index:index+args.cali_bsz,], quant_out)
+                        if target_layer is not None and args.dim2_loss_weight > 0:
+                            align_loss = 0.0
+                            for name, trans in (
+                                ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                                ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                                ("mlp.down_trans", layer.mlp.down_trans),
+                            ):
+                                target_right = _find_target_matrix_right(target_layer, name)
+                                cur_right = _get_right_matrix(trans)
+                                if cur_right.shape == (4, 4) and target_right.shape == (2, 2):
+                                    if args.soft_perm and name in perm_logits:
+                                        cur_block = trans._last_perm_right[:2, :2]
+                                        p_soft = trans._last_p_soft
+                                        if args.soft_perm_reg > 0:
+                                            reg = (p_soft * (1.0 - p_soft)).mean()
+                                            align_loss = align_loss + args.soft_perm_reg * reg
                                     else:
-                                        tgt_svals = tgt_svals[:cur_svals.numel()]
-                                    align_loss = align_loss + loss_func(
-                                        cur_svals.float(), tgt_svals.float()
+                                        cur_block = _best_perm_main_block(cur_right, target_right)
+                                    tgt_block = target_right
+                                else:
+                                    logger.warning(
+                                        f"skip dim_right align for {name}: cur {tuple(cur_right.shape)} "
+                                        f"target {tuple(target_right.shape)}"
                                     )
-                        if align_loss != 0.0:
-                            loss = loss + args.dim2_loss_weight * align_loss
-                    if args.comp_zero_weight > 0 and target_layer is not None:
-                        comp_loss = 0.0
-                        for name, trans in (
-                            ("self_attn.ln_trans", layer.self_attn.ln_trans),
-                            ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
-                            ("mlp.down_trans", layer.mlp.down_trans),
-                        ):
-                            if trans is None:
-                                continue
-                            cur_right = _get_right_matrix(trans)
-                            cur_left = _get_left_matrix(trans)
-                            if cur_right is None or cur_right.shape != (4, 4):
-                                continue
-                            if cur_left is None:
-                                continue
-                            x_prime = pre_trans_cache.get(name, None)
-                            if name == "self_attn.ln_trans":
-                                quantizer = layer.self_attn.q_proj.act_quantizer
-                            elif name == "mlp.up_gate_trans":
-                                quantizer = layer.mlp.up_proj.act_quantizer
-                            else:
-                                quantizer = layer.mlp.down_proj.act_quantizer
-                            tau = _zero_deadzone_tau(quantizer, x_prime)
-                            x_prime_reshaped = x_prime.view(*x_prime.shape[:-1], cur_left.shape[0], cur_right.shape[0])
-                            tau_reshaped = tau.view(*tau.shape[:-1], cur_left.shape[0], cur_right.shape[0])
-                            comp = x_prime_reshaped[..., :, 2:4]
-                            tau_comp = tau_reshaped[..., :, 2:4]
-                            tau_comp = tau_comp * args.comp_tau_alpha
-                            comp_loss = comp_loss + torch.mean(torch.relu(comp.abs() - tau_comp) ** 2)
-                        if comp_loss != 0.0:
-                            loss = loss + args.comp_zero_weight * comp_loss
-                    if args.nm_zero_weight > 0:
-                        nm_loss = 0.0
-                        for name, trans in (
-                            ("self_attn.ln_trans", layer.self_attn.ln_trans),
-                            ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
-                            ("mlp.down_trans", layer.mlp.down_trans),
-                        ):
-                            x_prime = pre_trans_cache.get(name, None)
-                            if name == "self_attn.ln_trans":
-                                quantizer = layer.self_attn.q_proj.act_quantizer
-                            elif name == "mlp.up_gate_trans":
-                                quantizer = layer.mlp.up_proj.act_quantizer
-                            else:
-                                quantizer = layer.mlp.down_proj.act_quantizer
-                            tau = _zero_deadzone_tau(quantizer, x_prime)
-                            hidden_dim = x_prime.shape[-1]
-                            nm_rows = hidden_dim // 4
-                            x_prime_reshaped = x_prime.view(*x_prime.shape[:-1], nm_rows, 4)
-                            tau_reshaped = tau.view(*tau.shape[:-1], nm_rows, 4)
-                            comp = x_prime_reshaped[..., :, 2:4]
-                            tau_comp = tau_reshaped[..., :, 2:4]
-                            tau_comp = tau_comp * args.comp_tau_alpha
-                            nm_loss = nm_loss + torch.mean(torch.relu(comp.abs() - tau_comp) ** 2)
-                        if nm_loss != 0.0:
-                            loss = loss + args.nm_zero_weight * nm_loss
-                    if args.soft_x_perm and args.soft_perm_reg > 0:
-                        x_perm_reg = 0.0
-                        for name, trans in (
-                            ("self_attn.ln_trans", layer.self_attn.ln_trans),
-                            ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
-                            ("mlp.down_trans", layer.mlp.down_trans),
-                        ):
-                            p_soft = trans._last_p_soft
-                            x_perm_reg = x_perm_reg + (p_soft * (1.0 - p_soft)).mean()
-                            if trans.use_x_perm_predictor and trans.x_perm_predictor is not None:
-                                p_x_soft = trans._last_x_p_soft
-                                x_perm_reg = x_perm_reg + (p_x_soft * (1.0 - p_x_soft)).mean()
-                        if x_perm_reg != 0.0:
-                            loss = loss + args.soft_perm_reg * x_perm_reg
-                    mse += loss.detach().cpu()
-                    loss = loss / loss.clone().detach()
-                    optimizer.zero_grad()
-                    loss.backward()
-                    grad_has_nan = False
-                    for group in optimizer.param_groups:
-                        for p in group["params"]:
-                            grad = p.grad
-                            if grad.is_sparse:
-                                grad = grad.coalesce().values()
-                            if torch.isnan(grad).any():
-                                grad_has_nan = True
+                                    continue
+                                align_loss = align_loss + loss_func(
+                                    cur_block.float(), tgt_block.to(cur_block.device, dtype=cur_block.dtype).float()
+                                )
+                                if name in target_left_svals:
+                                    cur_svals = _get_left_svals(trans)
+                                    if cur_svals is not None:
+                                        tgt_svals = target_left_svals[name].to(
+                                            cur_svals.device, dtype=cur_svals.dtype
+                                        )
+                                        if cur_svals.numel() >= tgt_svals.numel():
+                                            cur_svals = cur_svals[:tgt_svals.numel()]
+                                        else:
+                                            tgt_svals = tgt_svals[:cur_svals.numel()]
+                                        align_loss = align_loss + loss_func(
+                                            cur_svals.float(), tgt_svals.float()
+                                        )
+                            if align_loss != 0.0:
+                                loss = loss + args.dim2_loss_weight * align_loss
+                        if args.comp_zero_weight > 0 and target_layer is not None:
+                            comp_loss = 0.0
+                            for name, trans in (
+                                ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                                ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                                ("mlp.down_trans", layer.mlp.down_trans),
+                            ):
+                                if trans is None:
+                                    continue
+                                cur_right = _get_right_matrix(trans)
+                                cur_left = _get_left_matrix(trans)
+                                if cur_right is None or cur_right.shape != (4, 4):
+                                    continue
+                                if cur_left is None:
+                                    continue
+                                x_prime = pre_trans_cache.get(name, None)
+                                if name == "self_attn.ln_trans":
+                                    quantizer = layer.self_attn.q_proj.act_quantizer
+                                elif name == "mlp.up_gate_trans":
+                                    quantizer = layer.mlp.up_proj.act_quantizer
+                                else:
+                                    quantizer = layer.mlp.down_proj.act_quantizer
+                                tau = _zero_deadzone_tau(quantizer, x_prime)
+                                x_prime_reshaped = x_prime.view(*x_prime.shape[:-1], cur_left.shape[0], cur_right.shape[0])
+                                tau_reshaped = tau.view(*tau.shape[:-1], cur_left.shape[0], cur_right.shape[0])
+                                comp = x_prime_reshaped[..., :, 2:4]
+                                tau_comp = tau_reshaped[..., :, 2:4]
+                                tau_comp = tau_comp * args.comp_tau_alpha
+                                comp_loss = comp_loss + torch.mean(torch.relu(comp.abs() - tau_comp) ** 2)
+                            if comp_loss != 0.0:
+                                loss = loss + args.comp_zero_weight * comp_loss
+                        if args.nm_zero_weight > 0:
+                            nm_loss = 0.0
+                            for name, trans in (
+                                ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                                ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                                ("mlp.down_trans", layer.mlp.down_trans),
+                            ):
+                                x_prime = pre_trans_cache.get(name, None)
+                                if name == "self_attn.ln_trans":
+                                    quantizer = layer.self_attn.q_proj.act_quantizer
+                                elif name == "mlp.up_gate_trans":
+                                    quantizer = layer.mlp.up_proj.act_quantizer
+                                else:
+                                    quantizer = layer.mlp.down_proj.act_quantizer
+                                tau = _zero_deadzone_tau(quantizer, x_prime)
+                                hidden_dim = x_prime.shape[-1]
+                                nm_rows = hidden_dim // 4
+                                x_prime_reshaped = x_prime.view(*x_prime.shape[:-1], nm_rows, 4)
+                                tau_reshaped = tau.view(*tau.shape[:-1], nm_rows, 4)
+                                comp = x_prime_reshaped[..., :, 2:4]
+                                tau_comp = tau_reshaped[..., :, 2:4]
+                                tau_comp = tau_comp * args.comp_tau_alpha
+                                nm_loss = nm_loss + torch.mean(torch.relu(comp.abs() - tau_comp) ** 2)
+                            if nm_loss != 0.0:
+                                loss = loss + args.nm_zero_weight * nm_loss
+                        if args.soft_x_perm and args.soft_perm_reg > 0:
+                            x_perm_reg = 0.0
+                            for name, trans in (
+                                ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                                ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                                ("mlp.down_trans", layer.mlp.down_trans),
+                            ):
+                                p_soft = trans._last_p_soft
+                                x_perm_reg = x_perm_reg + (p_soft * (1.0 - p_soft)).mean()
+                                if trans.use_x_perm_predictor and trans.x_perm_predictor is not None:
+                                    p_x_soft = trans._last_x_p_soft
+                                    x_perm_reg = x_perm_reg + (p_x_soft * (1.0 - p_x_soft)).mean()
+                            if x_perm_reg != 0.0:
+                                loss = loss + args.soft_perm_reg * x_perm_reg
+                        mse += loss.detach().cpu()
+                        loss = loss / loss.clone().detach()
+                        if not torch.isfinite(loss).item():
+                            nan_in_grad = True
+                            logger.warning(
+                                f"NaN/Inf loss detected at layer {i}, epoch {epoch}, batch {j}."
+                            )
+                            break
+                        optimizer.zero_grad()
+                        loss.backward()
+                        grad_has_nan = False
+                        for group in optimizer.param_groups:
+                            for p in group["params"]:
+                                grad = p.grad
+                                if grad.is_sparse:
+                                    grad = grad.coalesce().values()
+                                if torch.isnan(grad).any():
+                                    grad_has_nan = True
+                                    break
+                            if grad_has_nan:
                                 break
                         if grad_has_nan:
+                            nan_in_grad = True
+                            logger.warning(
+                                f"NaN detected in gradients at layer {i}, epoch {epoch}, batch {j}."
+                            )
                             break
-                    if grad_has_nan:
-                        nan_in_grad = True
-                        logger.warning(
-                            f"NaN detected in gradients at layer {i}, epoch {epoch}, batch {j}. "
-                            "Stop training this layer and proceed to save parameters."
-                        )
-                        break
-                    optimizer.step()
-                    scheduler.step()
-            if nan_in_grad:
-                break
-            cur_lr = optimizer.state_dict()['param_groups'][0]['lr']
-            logger.info(f"layer {i} lwc lac iter {epoch}, lr {cur_lr:.8f}  time {time.time() - start_tick:.6f}s, mse: {mse:.8f}" )
+                        optimizer.step()
+                        scheduler.step()
+                if nan_in_grad:
+                    break
+                cur_lr = optimizer.state_dict()['param_groups'][0]['lr']
+                logger.info(f"layer {i} lwc lac iter {epoch}, lr {cur_lr:.8f}  time {time.time() - start_tick:.6f}s, mse: {mse:.8f}" )
+
+            if nan_in_grad and not nan_retried:
+                nan_retried = True
+                logger.warning(
+                    f"NaN detected at layer {i}. Retrain this layer with x_perm frozen."
+                )
+                _freeze_x_perm_params()
+                layer.load_state_dict(layer_state_before, strict=False)
+                optimizer, scheduler = _reset_optim_and_scheduler()
+                if len(optimizer.param_groups) == 0:
+                    logger.warning(
+                        f"Layer {i}: no trainable params after freezing x_perm; skip retrain."
+                    )
+                    break
+                continue
+            break
 
         _save_stage_ckpt("stage3" if args.use_stage3 else "stage_last")
         for h in hooks:
