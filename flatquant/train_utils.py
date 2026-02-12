@@ -243,7 +243,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 ("mlp.down_trans", layer.mlp.down_trans),
             ):
                 trans.use_x_perm = args.use_x_perm
-                trans.use_x_mask = args.use_x_mask
+                trans.use_x_mask = False
                 trans.use_x_perm_predictor = args.use_x_perm_predictor
                 if trans.use_x_perm_predictor and trans.x_perm_predictor is None:
                     num_blocks = trans.hidden_dim // trans.block_size
@@ -276,7 +276,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         if args.cali_trans:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.linear", ]), "lr": args.flat_lr})
             paras_name.append("trans.linear")
-        if args.add_diag:
+        if args.add_diag and args.cali_trans:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.diag_scale", ]), "lr": args.flat_lr})
             paras_name.append("trans.diag_scale")
         if args.lwc:
