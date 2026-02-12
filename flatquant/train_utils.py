@@ -358,6 +358,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             torch.save(ckpt, path)
             logger.info(f"saved stage checkpoint: {path}")
 
+        nan_in_grad = False
         for epoch in range(args.epochs):
             mse = 0
             start_tick = time.time()
@@ -505,8 +506,28 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     loss = loss / loss.clone().detach()
                     optimizer.zero_grad()
                     loss.backward()
+                    grad_has_nan = False
+                    for group in optimizer.param_groups:
+                        for p in group["params"]:
+                            grad = p.grad
+                            if grad.is_sparse:
+                                grad = grad.coalesce().values()
+                            if torch.isnan(grad).any():
+                                grad_has_nan = True
+                                break
+                        if grad_has_nan:
+                            break
+                    if grad_has_nan:
+                        nan_in_grad = True
+                        logger.warning(
+                            f"NaN detected in gradients at layer {i}, epoch {epoch}, batch {j}. "
+                            "Stop training this layer and proceed to save parameters."
+                        )
+                        break
                     optimizer.step()
                     scheduler.step()
+            if nan_in_grad:
+                break
             cur_lr = optimizer.state_dict()['param_groups'][0]['lr']
             logger.info(f"layer {i} lwc lac iter {epoch}, lr {cur_lr:.8f}  time {time.time() - start_tick:.6f}s, mse: {mse:.8f}" )
 
