@@ -242,7 +242,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
                 ("mlp.down_trans", layer.mlp.down_trans),
             ):
-                trans.use_x_perm = True
+                trans.use_x_perm = args.use_x_perm
                 trans.use_x_mask = args.use_x_mask
                 trans.use_x_perm_predictor = args.use_x_perm_predictor
                 if trans.use_x_perm_predictor and trans.x_perm_predictor is None:
@@ -269,7 +269,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
                 ("mlp.down_trans", layer.mlp.down_trans),
             ):
-                trans.use_perm = True
+                trans.use_perm = args.use_perm
                 trans.use_comp_mask = args.use_comp_mask
                 perm_logits[name] = trans.perm_logits
             perm_logits_by_layer[i] = perm_logits
@@ -494,8 +494,11 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                             ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
                             ("mlp.down_trans", layer.mlp.down_trans),
                         ):
-                            p_soft = trans._last_x_p_soft
+                            p_soft = trans._last_p_soft
                             x_perm_reg = x_perm_reg + (p_soft * (1.0 - p_soft)).mean()
+                            if trans.use_x_perm_predictor and trans.x_perm_predictor is not None:
+                                p_x_soft = trans._last_x_p_soft
+                                x_perm_reg = x_perm_reg + (p_x_soft * (1.0 - p_x_soft)).mean()
                         if x_perm_reg != 0.0:
                             loss = loss + args.soft_perm_reg * x_perm_reg
                     mse += loss.detach().cpu()
