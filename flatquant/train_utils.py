@@ -287,6 +287,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             paras_name.append("clip_factor_a")
 
         steps_per_epoch = max(1, args.nsamples // args.cali_bsz)
+        total_steps = max(1, args.epochs * steps_per_epoch)
         tmax = max(1, int(args.epochs * steps_per_epoch * args.flat_lr_tmax_mult))
         eta_min = args.flat_lr * args.flat_lr_min_ratio
         def _build_scheduler(optim):
@@ -362,6 +363,11 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             path = os.path.join(args.exp_dir, f"flat_parameters_{tag}.pth")
             torch.save(ckpt, path)
             logger.info(f"saved stage checkpoint: {path}")
+        def _set_x_mask_alpha(alpha):
+            for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
+                if trans is None or not getattr(trans, "use_x_mask", False):
+                    continue
+                trans.x_mask_alpha = alpha
         def _freeze_x_perm_params():
             for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
                 trans.use_x_perm=False
@@ -417,6 +423,10 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     for j in range(args.nsamples // args.cali_bsz):
                         index = j * args.cali_bsz
                         pre_trans_cache.clear()
+                        if args.use_x_mask:
+                            cur_step = epoch * steps_per_epoch + j + 1
+                            mask_alpha = min(1.0, cur_step / total_steps)
+                            _set_x_mask_alpha(mask_alpha)
                         quant_out = layer(fp_inps[index:index+args.cali_bsz,], attention_mask=attention_mask_batch, position_ids=position_ids)[0]
                         loss = loss_func(fp_outs[index:index+args.cali_bsz,], quant_out)
                         if target_layer is not None and args.dim2_loss_weight > 0:

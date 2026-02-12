@@ -180,6 +180,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.use_perm = False
         self.use_comp_mask = False
         self.use_x_mask = False
+        self.x_mask_alpha = 1.0
         self._last_p_soft = None
         self._last_perm_right = None
         self._last_x_p_soft = None
@@ -322,11 +323,13 @@ class SVDDecomposeTransMatrix(nn.Module):
         )
 
     def _apply_x_mask(self, tensor):
+        alpha = float(getattr(self, "x_mask_alpha", 1.0))
+        if alpha <= 0.0:
+            return tensor
         reshaped = tensor.view(*tensor.shape[:-1], -1, 4)
-        masked = reshaped.clone()
-        masked[..., 2:4] = 0
-        masked = masked.view_as(tensor)
-        return (masked - tensor).detach() + tensor
+        out = reshaped.clone()
+        out[..., 2:4] = out[..., 2:4] * (1.0 - alpha)
+        return out.view_as(tensor)
 
     def to_eval_mode(self):
         if not self._eval_mode:
