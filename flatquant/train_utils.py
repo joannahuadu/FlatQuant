@@ -243,7 +243,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 ("mlp.down_trans", layer.mlp.down_trans),
             ):
                 trans.use_x_perm = args.use_x_perm
-                trans.use_x_mask = False
+                trans.use_x_mask = args.use_x_mask if args.nm_zero_weight==0 else False
                 trans.use_x_perm_predictor = args.use_x_perm_predictor
                 if trans.use_x_perm_predictor and trans.x_perm_predictor is None:
                     num_blocks = trans.hidden_dim // trans.block_size
@@ -364,6 +364,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             logger.info(f"saved stage checkpoint: {path}")
         def _freeze_x_perm_params():
             for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
+                trans.use_x_perm=False
+                trans.use_x_mask=False
                 x_perm_logits = getattr(trans, "x_perm_logits", None)
                 if x_perm_logits is not None:
                     x_perm_logits.requires_grad_(False)
@@ -372,11 +374,17 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     for p in x_perm_predictor.parameters():
                         p.requires_grad_(False)
 
-        layer_state_before = {
-            k: (v.detach().cpu() if torch.is_tensor(v) else v)
-            for k, v in layer.state_dict().items()
-        }
+
         optimizer, scheduler = _reset_optim_and_scheduler()
+        trained_param_ids = set()
+        for g in trained_params:
+            for p in g["params"]:
+                trained_param_ids.add(id(p))
+        layer_state_before = {
+            name: param.detach().cpu()
+            for name, param in layer.named_parameters()
+            if id(param) in trained_param_ids
+        }
 
         nan_retried = False
         while True:

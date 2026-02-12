@@ -274,7 +274,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         if use_predictor and self.use_x_perm_predictor and self.x_perm_predictor is not None:
             bucket_logits, cluster_ids = self.x_perm_predictor(tensor, return_bucketed=True)
             perm = self._sinkhorn_chunked(bucket_logits.to(tensor))
-            if perm.max().item() < 0.99 and eval:
+            if perm.max().item() < 0.6 and eval:
                 self._last_x_p_soft = None
                 return tensor
             self._last_x_p_soft = perm
@@ -291,7 +291,7 @@ class SVDDecomposeTransMatrix(nn.Module):
             return y.view(*tensor.shape[:-1], self.hidden_dim)
         x_perm_logits = self.x_perm_logits.to(tensor)
         perm = self._sinkhorn_chunked(x_perm_logits.view(-1, *x_perm_logits.shape[-3:]))
-        if perm.max().item() < 0.99 and eval:
+        if perm.max().item() < 0.6 and eval:
             self._last_x_p_soft = None
             return tensor
         self._last_p_soft = perm.view_as(x_perm_logits)
