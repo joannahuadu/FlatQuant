@@ -528,6 +528,28 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                 nm_loss = nm_loss + torch.mean(torch.relu(comp.abs() - tau_comp) ** 2)
                             if nm_loss != 0.0:
                                 loss = loss + args.nm_zero_weight * nm_loss
+                        if args.x_mask_energy_weight > 0 or args.x_mask_2hot_weight > 0:
+                            energy_loss = None
+                            twohot_loss = None
+                            for name, trans in (
+                                ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                                ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                                ("mlp.down_trans", layer.mlp.down_trans),
+                            ):
+                                if trans is None or not getattr(trans, "use_x_mask", False):
+                                    continue
+                                if args.x_mask_energy_weight > 0:
+                                    ent = getattr(trans, "_last_x_mask_ent", None)
+                                    if ent is not None:
+                                        energy_loss = ent if energy_loss is None else energy_loss + ent
+                                if args.x_mask_2hot_weight > 0:
+                                    l2 = getattr(trans, "_last_x_mask_l2", None)
+                                    if l2 is not None:
+                                        twohot_loss = l2 if twohot_loss is None else twohot_loss + l2
+                            if energy_loss is not None:
+                                loss = loss + args.x_mask_energy_weight * energy_loss
+                            if twohot_loss is not None:
+                                loss = loss + args.x_mask_2hot_weight * twohot_loss
                         if args.soft_x_perm and args.soft_perm_reg > 0:
                             x_perm_reg = 0.0
                             for name, trans in (

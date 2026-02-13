@@ -144,6 +144,16 @@ def parser_gen():
                         help="Hidden size of the x_perm predictor MLP.")
     parser.add_argument("--use_x_mask", action=argparse.BooleanOptionalAction, default=False,
                         help="Zero out channels 2:4 of each 4-wide block after x_perm.")
+    parser.add_argument("--x_mask_mode", type=str, default="hard_fixed",
+                        choices=["hard_fixed", "hard_top2", "soft_top2"],
+                        help="Masking mode after x_perm: hard_fixed zeros channels 2:4; "
+                             "hard_top2 keeps top-2 magnitudes per group; soft_top2 uses 2*softmax gate.")
+    parser.add_argument("--x_mask_tau", type=float, default=1.0,
+                        help="Temperature for soft_top2 x_mask_mode (lower -> sharper).")
+    parser.add_argument("--x_mask_energy_weight", type=float, default=0.0,
+                        help="Weight for energy concentration loss on per-group 4d activations.")
+    parser.add_argument("--x_mask_2hot_weight", type=float, default=0.0,
+                        help="Weight for encouraging 2-of-4 (two-hot) gates in soft_top2 mode.")
     parser.add_argument("--use_perm", action=argparse.BooleanOptionalAction, default=True,
                         help="Enable soft permutation during reparameterization.")
     parser.add_argument("--use_comp_mask", action=argparse.BooleanOptionalAction, default=False,

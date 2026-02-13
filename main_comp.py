@@ -226,6 +226,8 @@ def _apply_flatquant(model, apply_flatquant_to_model, args, trainloader, logger)
         use_comp_mask=args.use_comp_mask,
         use_x_perm=args.use_x_perm,
         use_x_mask=args.use_x_mask,
+        x_mask_mode=args.x_mask_mode,
+        x_mask_tau=args.x_mask_tau,
         use_x_perm_predictor=args.use_x_perm_predictor,
         x_perm_num_clusters=args.x_perm_num_clusters,
         x_perm_pred_hidden=args.x_perm_pred_hidden,

@@ -181,6 +181,10 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.use_comp_mask = False
         self.use_x_mask = False
         self.x_mask_alpha = 1.0
+        self.x_mask_mode = "hard_fixed"
+        self.x_mask_tau = 1.0
+        self._last_x_mask_ent = None
+        self._last_x_mask_l2 = None
         self._last_p_soft = None
         self._last_perm_right = None
         self._last_x_p_soft = None
@@ -323,10 +327,43 @@ class SVDDecomposeTransMatrix(nn.Module):
         )
 
     def _apply_x_mask(self, tensor):
+        self._last_x_mask_ent = None
+        self._last_x_mask_l2 = None
         alpha = float(getattr(self, "x_mask_alpha", 1.0))
         if alpha <= 0.0:
             return tensor
         reshaped = tensor.view(*tensor.shape[:-1], -1, 4)
+        mode = getattr(self, "x_mask_mode", "hard_fixed")
+        if mode == "hard_fixed":
+            out = reshaped.clone()
+            out[..., 2:4] = out[..., 2:4] * (1.0 - alpha)
+            return out.view_as(tensor)
+
+        scores = reshaped.abs()
+        a = scores.pow(2)
+        q = a / (a.sum(dim=-1, keepdim=True) + 1e-9)
+        self._last_x_mask_ent = -(q * q.clamp_min(1e-9).log()).sum(dim=-1).mean()
+        if mode == "hard_top2":
+            idx = scores.topk(2, dim=-1).indices
+            mask = torch.zeros_like(reshaped)
+            mask.scatter_(-1, idx, 1.0)
+            self._last_x_mask_l2 = (mask.pow(2).sum(dim=-1) - 2.0).pow(2).mean()
+            gate = (1.0 - alpha) + alpha * mask
+            return (reshaped * gate).view_as(tensor)
+        if mode == "soft_top2":
+            tau = float(getattr(self, "x_mask_tau", 1.0))
+            if tau <= 0.0:
+                idx = scores.topk(2, dim=-1).indices
+                mask = torch.zeros_like(reshaped)
+                mask.scatter_(-1, idx, 1.0)
+                gate_raw = mask
+            else:
+                p = torch.softmax(scores / tau, dim=-1)
+                gate_raw = 2.0 * p
+            self._last_x_mask_l2 = (gate_raw.pow(2).sum(dim=-1) - 2.0).pow(2).mean()
+            gate = gate_raw if alpha >= 1.0 else (1.0 - alpha) + alpha * gate_raw
+            return (reshaped * gate).view_as(tensor)
+
         out = reshaped.clone()
         out[..., 2:4] = out[..., 2:4] * (1.0 - alpha)
         return out.view_as(tensor)
