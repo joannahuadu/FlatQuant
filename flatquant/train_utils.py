@@ -568,10 +568,27 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                 ("mlp.down_trans", layer.mlp.down_trans),
                             ):
                                 gate_mean = getattr(trans, "_last_x_mask_gate_mean", None)
-                                if gate_mean is not None:
-                                    gate_cost = gate_mean if gate_cost is None else gate_cost + gate_mean
+                                if gate_mean is None:
+                                    continue
+                                if args.x_mask_gate_target is None:
+                                    cost = gate_mean
+                                else:
+                                    cost = (gate_mean - args.x_mask_gate_target) ** 2
+                                gate_cost = cost if gate_cost is None else gate_cost + cost
                             if gate_cost is not None:
                                 loss = loss + args.x_mask_gate_cost * gate_cost
+                        if args.x_mask_gate_entropy > 0:
+                            gate_entropy = None
+                            for name, trans in (
+                                ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                                ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                                ("mlp.down_trans", layer.mlp.down_trans),
+                            ):
+                                ent = getattr(trans, "_last_x_mask_gate_entropy", None)
+                                if ent is not None:
+                                    gate_entropy = ent if gate_entropy is None else gate_entropy + ent
+                            if gate_entropy is not None:
+                                loss = loss + args.x_mask_gate_entropy * gate_entropy
                         if args.soft_x_perm and args.soft_perm_reg > 0:
                             x_perm_reg = 0.0
                             for name, trans in (
