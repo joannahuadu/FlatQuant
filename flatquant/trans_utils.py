@@ -183,8 +183,10 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.x_mask_alpha = 1.0
         self.x_mask_mode = "hard_fixed"
         self.x_mask_tau = 1.0
+        self.x_mask_gate_logits = nn.Parameter(torch.zeros((left_size * right_size) // 4, dtype=torch.float32), requires_grad=True)
         self._last_x_mask_ent = None
         self._last_x_mask_l2 = None
+        self._last_x_mask_gate_mean = None
         self._last_p_soft = None
         self._last_perm_right = None
         self._last_x_p_soft = None
@@ -243,6 +245,8 @@ class SVDDecomposeTransMatrix(nn.Module):
             )
             if self.use_x_perm and self.x_perm_logits is not None:
                 out = self._apply_x_perm(out, use_predictor=not inv_t, eval=self._eval_mode)
+            if not self.use_x_perm and self.use_x_mask:
+                self._last_x_perm_applied=True
             if self.use_x_mask and not inv_t and self._last_x_perm_applied:
                 out = self._apply_x_mask(out)
             return out
@@ -331,6 +335,7 @@ class SVDDecomposeTransMatrix(nn.Module):
     def _apply_x_mask(self, tensor):
         self._last_x_mask_ent = None
         self._last_x_mask_l2 = None
+        self._last_x_mask_gate_mean = None
         alpha = float(getattr(self, "x_mask_alpha", 1.0))
         if alpha <= 0.0:
             return tensor
@@ -342,9 +347,25 @@ class SVDDecomposeTransMatrix(nn.Module):
             return out.view_as(tensor)
 
         scores = reshaped.abs()
-        a = scores.pow(2)
-        # q = a / (a.sum(dim=-1, keepdim=True) + 1e-9)
-        # self._last_x_mask_ent = -(q * q.clamp_min(1e-9).log()).sum(dim=-1).mean()
+        if mode == "switch_top2":
+            tau = float(getattr(self, "x_mask_tau", 1.0))
+            if tau <= 0.0:
+                idx = scores.topk(2, dim=-1).indices
+                gate_raw = torch.zeros_like(reshaped)
+                gate_raw.scatter_(-1, idx, 1.0)
+            else:
+                p = torch.softmax(scores / tau, dim=-1)
+                gate_raw = 2.0 * p
+            self._last_x_mask_l2 = (gate_raw.pow(2).sum(dim=-1) - 2.0).pow(2).mean()
+            x_sp = reshaped * gate_raw
+            logits = self.x_mask_gate_logits.to(reshaped)
+            r = torch.sigmoid(logits)
+            self._last_x_mask_gate_mean = r.mean()
+            r = r.unsqueeze(-1)
+            mixed = r * reshaped + (1.0 - r) * x_sp
+            if alpha < 1.0:
+                mixed = (1.0 - alpha) * reshaped + alpha * mixed
+            return mixed.view_as(tensor)
         if mode == "hard_top2":
             idx = scores.topk(2, dim=-1).indices
             mask = torch.zeros_like(reshaped)

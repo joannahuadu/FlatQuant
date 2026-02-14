@@ -145,11 +145,14 @@ def parser_gen():
     parser.add_argument("--use_x_mask", action=argparse.BooleanOptionalAction, default=False,
                         help="Zero out channels 2:4 of each 4-wide block after x_perm.")
     parser.add_argument("--x_mask_mode", type=str, default="hard_fixed",
-                        choices=["hard_fixed", "hard_top2", "soft_top2"],
+                        choices=["hard_fixed", "hard_top2", "soft_top2", "switch_top2"],
                         help="Masking mode after x_perm: hard_fixed zeros channels 2:4; "
-                             "hard_top2 keeps top-2 magnitudes per group; soft_top2 uses 2*softmax gate.")
+                             "hard_top2 keeps top-2 magnitudes per group; soft_top2 uses 2*softmax gate; "
+                             "switch_top2 chooses between dense and top2 per group.")
     parser.add_argument("--x_mask_tau", type=float, default=1.0,
                         help="Temperature for soft_top2 x_mask_mode (lower -> sharper).")
+    parser.add_argument("--x_mask_gate_cost", type=float, default=0.0,
+                        help="L1 cost on switch_top2 gate mean (encourage more sparse groups).")
     parser.add_argument("--x_mask_energy_weight", type=float, default=0.0,
                         help="Weight for energy concentration loss on per-group 4d activations.")
     parser.add_argument("--x_mask_2hot_weight", type=float, default=0.0,

@@ -245,6 +245,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 if trans.use_x_mask:
                     trans.x_mask_mode = args.x_mask_mode
                     trans.x_mask_tau = args.x_mask_tau
+                    if args.x_mask_mode == "switch_top2":
+                        if hasattr(trans, "x_mask_gate_logits"):
+                            trans.x_mask_gate_logits.data.fill_(0)
                 trans.use_x_perm_predictor = args.use_x_perm_predictor
                 if trans.use_x_perm_predictor and trans.x_perm_predictor is None:
                     num_blocks = trans.hidden_dim // trans.block_size
@@ -289,6 +292,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         if args.lac:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["clip_factor_a", ]), "lr": args.flat_lr * 10})
             paras_name.append("clip_factor_a")
+        if args.use_x_mask and args.x_mask_mode == "switch_top2":
+            trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.x_mask_gate", ]), "lr": args.flat_lr})
+            paras_name.append("trans.x_mask_gate")
 
         steps_per_epoch = max(1, args.nsamples // args.cali_bsz)
         total_steps = max(1, args.epochs * steps_per_epoch)
@@ -554,6 +560,18 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                 loss = loss + args.x_mask_energy_weight * energy_loss
                             if twohot_loss is not None:
                                 loss = loss + args.x_mask_2hot_weight * twohot_loss
+                        if args.x_mask_gate_cost > 0:
+                            gate_cost = None
+                            for name, trans in (
+                                ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                                ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                                ("mlp.down_trans", layer.mlp.down_trans),
+                            ):
+                                gate_mean = getattr(trans, "_last_x_mask_gate_mean", None)
+                                if gate_mean is not None:
+                                    gate_cost = gate_mean if gate_cost is None else gate_cost + gate_mean
+                            if gate_cost is not None:
+                                loss = loss + args.x_mask_gate_cost * gate_cost
                         if args.soft_x_perm and args.soft_perm_reg > 0:
                             x_perm_reg = 0.0
                             for name, trans in (

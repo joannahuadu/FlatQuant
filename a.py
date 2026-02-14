@@ -1,12 +1,12 @@
 import torch
-a = torch.load("./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260212_175645/flat_matrices.pth")
+a = torch.load("./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260214_012327/flat_matrices.pth")
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260202_003601/flat_matrices.pth
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260208_004512/flat_matrices.pth use_perm 4dim
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260208_144852/flat_matrices.pth  4dim_new
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260207_233015/flat_matrices.pth" no use perm 4dim
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260208_144923/flat_matrices.pth  2dim_new
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260204_195112/flat_matrices.pth  2dim
-# print(a[0].keys())
+print(len(a[0].keys()))
 
 # matrix_u_left, matrix_u_right = a[0]['self_attn.ln_trans.linear_u_left.parametrizations.weight.original'], a[0]['self_attn.ln_trans.linear_u_right.parametrizations.weight.original']
 # matrix_v_left, matrix_v_right = a[0]['self_attn.ln_trans.linear_v_left.parametrizations.weight.original'], a[0]['self_attn.ln_trans.linear_v_right.parametrizations.weight.original']
