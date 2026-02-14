@@ -243,8 +243,8 @@ class SVDDecomposeTransMatrix(nn.Module):
             )
             if self.use_x_perm and self.x_perm_logits is not None:
                 out = self._apply_x_perm(out, use_predictor=not inv_t, eval=self._eval_mode)
-                if self.use_x_mask and not inv_t and self._last_x_perm_applied:
-                    out = self._apply_x_mask(out)
+            if self.use_x_mask and not inv_t and self._last_x_perm_applied:
+                out = self._apply_x_mask(out)
             return out
         matrix_left, matrix_right = matrix_u_left @ torch.diag(linear_diag_left) @ matrix_v_left.t(), matrix_u_right @ torch.diag(linear_diag_right) @ matrix_v_right.t()
         # if not inv_t:
@@ -254,8 +254,10 @@ class SVDDecomposeTransMatrix(nn.Module):
         )
         if self.use_x_perm and self.x_perm_logits is not None:
             out = self._apply_x_perm(out, use_predictor=not inv_t, eval=self._eval_mode)
-            if self.use_x_mask and not inv_t and self._last_x_perm_applied:
-                out = self._apply_x_mask(out)
+        if not self.use_x_perm and self.use_x_mask:
+            self._last_x_perm_applied=True
+        if self.use_x_mask and not inv_t and self._last_x_perm_applied:
+            out = self._apply_x_mask(out)
         return out
 
     def _apply_right_perm(self, matrix_right):
@@ -341,8 +343,8 @@ class SVDDecomposeTransMatrix(nn.Module):
 
         scores = reshaped.abs()
         a = scores.pow(2)
-        q = a / (a.sum(dim=-1, keepdim=True) + 1e-9)
-        self._last_x_mask_ent = -(q * q.clamp_min(1e-9).log()).sum(dim=-1).mean()
+        # q = a / (a.sum(dim=-1, keepdim=True) + 1e-9)
+        # self._last_x_mask_ent = -(q * q.clamp_min(1e-9).log()).sum(dim=-1).mean()
         if mode == "hard_top2":
             idx = scores.topk(2, dim=-1).indices
             mask = torch.zeros_like(reshaped)
@@ -360,6 +362,7 @@ class SVDDecomposeTransMatrix(nn.Module):
             else:
                 p = torch.softmax(scores / tau, dim=-1)
                 gate_raw = 2.0 * p
+            # print(gate_raw[0,0,0,:])
             self._last_x_mask_l2 = (gate_raw.pow(2).sum(dim=-1) - 2.0).pow(2).mean()
             gate = gate_raw if alpha >= 1.0 else (1.0 - alpha) + alpha * gate_raw
             return (reshaped * gate).view_as(tensor)

@@ -234,8 +234,6 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         trained_params, paras_name = [], []
         perm_logits = {}
         if args.soft_x_perm:
-            trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.x_perm_logits", ]), "lr": args.flat_lr})
-            paras_name.append("trans.x_perm_logits")
             predictor_params = []
             for name, trans in (
                 ("self_attn.ln_trans", layer.self_attn.ln_trans),
@@ -244,6 +242,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             ):
                 trans.use_x_perm = args.use_x_perm
                 trans.use_x_mask = args.use_x_mask if args.nm_zero_weight==0 else False
+                if trans.use_x_mask:
+                    trans.x_mask_mode = args.x_mask_mode
+                    trans.x_mask_tau = args.x_mask_tau
                 trans.use_x_perm_predictor = args.use_x_perm_predictor
                 if trans.use_x_perm_predictor and trans.x_perm_predictor is None:
                     num_blocks = trans.hidden_dim // trans.block_size
@@ -261,6 +262,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             if len(predictor_params) > 0:
                 trained_params.append({"params": predictor_params, "lr": args.flat_lr})
                 paras_name.append("trans.x_perm_predictor")
+            if args.use_x_perm:
+                trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.x_perm_logits", ]), "lr": args.flat_lr})
+                paras_name.append("trans.x_perm_logits")
         elif args.soft_perm and target_layer is not None:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.perm_logits", ]), "lr": args.flat_lr})
             paras_name.append("trans.perm_logits")

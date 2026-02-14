@@ -7,7 +7,7 @@ LOG_DIR="/gemini/code/NMSparsity/FlatQuant/logs"
 mkdir -p "$LOG_DIR"
 TS="$(date +%Y%m%d_%H%M%S)"
 
-LAYERS=(0 15 31)
+LAYERS=(1 8 15 22 29)
 ATTN=(q_proj k_proj v_proj o_proj)
 MLP=(up_proj gate_proj down_proj)
 
@@ -27,24 +27,21 @@ run_obs() {
     --a_bits 4 \
     --gptq \
     --cali_bsz 4 \
-    --epoch 60 \
-    --flat_lr 1e-3 \
-    --use_stage2 \
-    --use_stage3 \
-    --stage2_start 30 \
-    --stage3_start 45 \
+    --epoch 15 \
+    --flat_lr 5e-3 \
     --lwc \
     --lac \
     --reload_matrix \
-    --matrix_path /gemini/code/NMSparsity/FlatQuant/outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260202_003601 \
+    --matrix_path /gemini/code/NMSparsity/FlatQuant/outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260212_175645 \
     --add_diag \
-    --dim2_matrix_path ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260204_195112/flat_matrices.pth \
-    --dim2_loss_weight 0.0001 \
-    --soft_perm \
-    --soft_perm_reg 0.1 \
+    --soft_x_perm \
+    --soft_perm_reg 0 \
     --comp_tau_alpha 0 \
-    --comp_zero_weight 1 \
-    --use_perm \
+    --nm_zero_weight 1 \
+    --use_x_perm \
+    --no-use_x_mask \
+    --no-use_x_perm_predictor \
+    --no-use_perm \
     --no-use_comp_mask \
     --output_dir ./outputs \
     --save_matrix \
@@ -54,7 +51,7 @@ run_obs() {
     --obs \
     --obs_target "$target" \
     --obs_hook_position post_quant \
-    >> "$LOG_DIR/obs_w4a4_post_quant.log" 2>&1
+    >> "$LOG_DIR/obs_w4a4_post_quant_0212.log" 2>&1
 }
 
 for layer in "${LAYERS[@]}"; do
