@@ -245,7 +245,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 if trans.use_x_mask:
                     trans.x_mask_mode = args.x_mask_mode
                     trans.x_mask_tau = args.x_mask_tau
-                    if args.x_mask_mode == "switch_top2":
+                    if "switch_top2" in args.x_mask_mode:
                         if hasattr(trans, "x_mask_gate_logits"):
                             trans.x_mask_gate_logits.data.fill_(0)
                 trans.use_x_perm_predictor = args.use_x_perm_predictor
@@ -292,7 +292,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         if args.lac:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["clip_factor_a", ]), "lr": args.flat_lr * 10})
             paras_name.append("clip_factor_a")
-        if args.use_x_mask and args.x_mask_mode == "switch_top2":
+        if args.use_x_mask and "switch_top2" in args.x_mask_mode:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.x_mask_gate", ]), "lr": args.flat_lr})
             paras_name.append("trans.x_mask_gate")
 
@@ -433,10 +433,10 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     for j in range(args.nsamples // args.cali_bsz):
                         index = j * args.cali_bsz
                         pre_trans_cache.clear()
-                        if args.use_x_mask:
-                            cur_step = epoch * steps_per_epoch + j + 1
-                            mask_alpha = min(1.0, cur_step / total_steps)
-                            _set_x_mask_alpha(mask_alpha)
+                        # if args.use_x_mask:
+                        #     cur_step = epoch * steps_per_epoch + j + 1
+                        #     mask_alpha = min(1.0, cur_step / total_steps)
+                        #     _set_x_mask_alpha(mask_alpha)
                         quant_out = layer(fp_inps[index:index+args.cali_bsz,], attention_mask=attention_mask_batch, position_ids=position_ids)[0]
                         loss = loss_func(fp_outs[index:index+args.cali_bsz,], quant_out)
                         if target_layer is not None and args.dim2_loss_weight > 0:
