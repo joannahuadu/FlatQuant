@@ -151,6 +151,13 @@ def parser_gen():
                              "switch_top2 chooses between dense and top2 per group.")
     parser.add_argument("--x_mask_tau", type=float, default=1.0,
                         help="Temperature for soft_top2 x_mask_mode (lower -> sharper).")
+    parser.add_argument("--x_mask_r_thr", type=float, default=None,
+                        help="Optional threshold for r in switch_top2 modes during eval; "
+                             "if set, groups with r < thr use a hard mask.")
+    parser.add_argument("--x_mask_r_mode", type=str, default="top2",
+                        choices=["top2", "gate_raw"],
+                        help="Hard mask source for r < thr in switch_top2 modes: "
+                             "top2 uses mixed activations; gate_raw uses the raw gate.")
     parser.add_argument("--x_mask_gate_cost", type=float, default=0.0,
                         help="Weight for switch_top2 gate mean target loss (or L1 if target not set).")
     parser.add_argument("--x_mask_gate_target", type=float, default=None,

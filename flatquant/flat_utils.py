@@ -44,6 +44,8 @@ def reparameterize_model(
     use_x_mask=False,
     x_mask_mode="hard_fixed",
     x_mask_tau=1.0,
+    x_mask_r_thr=None,
+    x_mask_r_mode="top2",
     use_x_perm_predictor=False,
     x_perm_num_clusters=4,
     x_perm_pred_hidden=128,
@@ -57,6 +59,8 @@ def reparameterize_model(
             layer.self_attn.ln_trans.use_x_mask = use_x_mask
             layer.self_attn.ln_trans.x_mask_mode = x_mask_mode
             layer.self_attn.ln_trans.x_mask_tau = x_mask_tau
+            layer.self_attn.ln_trans.x_mask_r_thr = x_mask_r_thr
+            layer.self_attn.ln_trans.x_mask_r_mode = x_mask_r_mode
             layer.self_attn.ln_trans.use_x_perm_predictor = use_x_perm_predictor
             if use_x_perm_predictor and layer.self_attn.ln_trans.x_perm_predictor is None:
                 trans = layer.self_attn.ln_trans
@@ -74,6 +78,8 @@ def reparameterize_model(
             layer.mlp.up_gate_trans.use_x_mask = use_x_mask
             layer.mlp.up_gate_trans.x_mask_mode = x_mask_mode
             layer.mlp.up_gate_trans.x_mask_tau = x_mask_tau
+            layer.mlp.up_gate_trans.x_mask_r_thr = x_mask_r_thr
+            layer.mlp.up_gate_trans.x_mask_r_mode = x_mask_r_mode
             layer.mlp.up_gate_trans.use_x_perm_predictor = use_x_perm_predictor
             if use_x_perm_predictor and layer.mlp.up_gate_trans.x_perm_predictor is None:
                 trans = layer.mlp.up_gate_trans
@@ -91,6 +97,8 @@ def reparameterize_model(
             layer.mlp.down_trans.use_x_mask = use_x_mask
             layer.mlp.down_trans.x_mask_mode = x_mask_mode
             layer.mlp.down_trans.x_mask_tau = x_mask_tau
+            layer.mlp.down_trans.x_mask_r_thr = x_mask_r_thr
+            layer.mlp.down_trans.x_mask_r_mode = x_mask_r_mode
             layer.mlp.down_trans.use_x_perm_predictor = use_x_perm_predictor
             if use_x_perm_predictor and layer.mlp.down_trans.x_perm_predictor is None:
                 trans = layer.mlp.down_trans

@@ -76,6 +76,8 @@ def main():
             use_x_mask=args.use_x_mask,
             x_mask_mode=args.x_mask_mode,
             x_mask_tau=args.x_mask_tau,
+            x_mask_r_thr=args.x_mask_r_thr,
+            x_mask_r_mode=args.x_mask_r_mode,
             use_x_perm_predictor=args.use_x_perm_predictor,
             x_perm_num_clusters=args.x_perm_num_clusters,
             x_perm_pred_hidden=args.x_perm_pred_hidden,
