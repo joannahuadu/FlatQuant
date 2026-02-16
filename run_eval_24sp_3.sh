@@ -322,7 +322,74 @@ TS="$(date +%Y%m%d_%H%M%S)"
 #   --lm_eval_batch_size 16 \
 #   >> "$LOG_DIR/eval_w4a4_24sp_l20_l30_alpha0_ep50_lr5e-4_usexperm_usexmask_usepredictor.log" 2>&1 &
 
-nohup env CUDA_VISIBLE_DEVICES=0 python main.py \
+# nohup env CUDA_VISIBLE_DEVICES=2 python main.py \
+#   --model "$MODEL_PATH" \
+#   --w_bits 4 \
+#   --a_bits 4 \
+#   --gptq \
+#   --cali_bsz 4 \
+#   --epoch 30 \
+#   --flat_lr 5e-3 \
+#   --lwc \
+#   --lac \
+#   --cali_trans \
+#   --add_diag \
+#   --dim_right 4 \
+#   --soft_x_perm \
+#   --soft_perm_reg 0 \
+#   --comp_tau_alpha 0 \
+#   --nm_zero_weight 0 \
+#   --x_mask_2hot_weight 0 \
+#   --x_mask_energy_weight 0 \
+#   --no-use_x_perm \
+#   --use_x_mask \
+#   --x_mask_tau 1 \
+#   --x_mask_mode soft_top2 \
+#   --no-use_x_perm_predictor \
+#   --no-use_perm \
+#   --no-use_comp_mask \
+#   --output_dir ./outputs \
+#   --save_matrix \
+#   --lm_eval \
+#   --tasks winogrande openbookqa mmlu arc_challenge \
+#   --lm_eval_batch_size 16 \
+#   >> "$LOG_DIR/eval_w4a4_24sp_l20_l30_l40_l50_alpha0_ep30_lr5e-3_usexperm_usexmask_dim_right=4.log" 2>&1 &
+
+# sleep 30
+
+# nohup env CUDA_VISIBLE_DEVICES=3 python main.py \
+#   --model "$MODEL_PATH" \
+#   --w_bits 4 \
+#   --a_bits 4 \
+#   --gptq \
+#   --cali_bsz 4 \
+#   --epoch 30 \
+#   --flat_lr 5e-3 \
+#   --lwc \
+#   --lac \
+#   --cali_trans \
+#   --add_diag \
+#   --soft_x_perm \
+#   --soft_perm_reg 0 \
+#   --comp_tau_alpha 0 \
+#   --nm_zero_weight 0 \
+#   --x_mask_2hot_weight 0 \
+#   --x_mask_energy_weight 0 \
+#   --no-use_x_perm \
+#   --use_x_mask \
+#   --x_mask_tau 1 \
+#   --x_mask_mode soft_top2 \
+#   --no-use_x_perm_predictor \
+#   --no-use_perm \
+#   --no-use_comp_mask \
+#   --output_dir ./outputs \
+#   --save_matrix \
+#   --lm_eval \
+#   --tasks winogrande openbookqa mmlu arc_challenge \
+#   --lm_eval_batch_size 16 \
+#   >> "$LOG_DIR/eval_w4a4_24sp_l20_l30_l40_l50_alpha0_ep30_lr5e-3_usexperm_usexmask.log" 2>&1 &
+
+nohup env CUDA_VISIBLE_DEVICES=2 python main.py \
   --model "$MODEL_PATH" \
   --w_bits 4 \
   --a_bits 4 \
@@ -334,12 +401,11 @@ nohup env CUDA_VISIBLE_DEVICES=0 python main.py \
   --lac \
   --cali_trans \
   --add_diag \
-  --dim_right 4 \
   --soft_x_perm \
   --soft_perm_reg 0 \
   --comp_tau_alpha 0 \
   --nm_zero_weight 0 \
-  --x_mask_gate_cost 0.0001 \
+  --x_mask_gate_entropy 1e-4 \
   --no-use_x_perm \
   --use_x_mask \
   --x_mask_tau 0.03 \
@@ -352,11 +418,11 @@ nohup env CUDA_VISIBLE_DEVICES=0 python main.py \
   --lm_eval \
   --tasks winogrande openbookqa mmlu arc_challenge \
   --lm_eval_batch_size 16 \
-  >> "$LOG_DIR/eval_w4a4_24sp_r11e-4_ep30_lr5e-3_usexperm_usexmask_dim_right=4.log" 2>&1 &
+  >> "$LOG_DIR/eval_w4a4_24sp_r21e-4_ep30_lr5e-3_usexperm_usexmask.log" 2>&1 &
 
 sleep 30
 
-nohup env CUDA_VISIBLE_DEVICES=1 python main.py \
+nohup env CUDA_VISIBLE_DEVICES=3 python main.py \
   --model "$MODEL_PATH" \
   --w_bits 4 \
   --a_bits 4 \
@@ -372,11 +438,12 @@ nohup env CUDA_VISIBLE_DEVICES=1 python main.py \
   --soft_perm_reg 0 \
   --comp_tau_alpha 0 \
   --nm_zero_weight 0 \
-  --x_mask_gate_cost 0.0001 \
+  --x_mask_2hot_weight 1e-4 \
+  --x_mask_gate_entropy 1e-4 \
   --no-use_x_perm \
   --use_x_mask \
   --x_mask_tau 0.03 \
-  --x_mask_mode switch_top2_hard \
+  --x_mask_mode switch_top2_soft \
   --no-use_x_perm_predictor \
   --no-use_perm \
   --no-use_comp_mask \
@@ -385,4 +452,4 @@ nohup env CUDA_VISIBLE_DEVICES=1 python main.py \
   --lm_eval \
   --tasks winogrande openbookqa mmlu arc_challenge \
   --lm_eval_batch_size 16 \
-  >> "$LOG_DIR/eval_w4a4_24sp_r11e-4_ep30_lr5e-3_usexperm_usexmask.log" 2>&1 &
+  >> "$LOG_DIR/eval_w4a4_24sp_soft1e-4_r21e-4_ep30_lr5e-3_usexperm_usexmask.log" 2>&1 &

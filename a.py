@@ -1,12 +1,12 @@
 import torch
-a = torch.load("./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260214_012327/flat_matrices.pth")
+a = torch.load("./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260215_014017/flat_matrices.pth")
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260202_003601/flat_matrices.pth
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260208_004512/flat_matrices.pth use_perm 4dim
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260208_144852/flat_matrices.pth  4dim_new
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260207_233015/flat_matrices.pth" no use perm 4dim
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260208_144923/flat_matrices.pth  2dim_new
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260204_195112/flat_matrices.pth  2dim
-print(len(a[0].keys()))
+print(a[0].keys())
 
 # matrix_u_left, matrix_u_right = a[0]['self_attn.ln_trans.linear_u_left.parametrizations.weight.original'], a[0]['self_attn.ln_trans.linear_u_right.parametrizations.weight.original']
 # matrix_v_left, matrix_v_right = a[0]['self_attn.ln_trans.linear_v_left.parametrizations.weight.original'], a[0]['self_attn.ln_trans.linear_v_right.parametrizations.weight.original']
@@ -24,14 +24,16 @@ temp = 0.01
 n_iters = 10
 
 for i in range(32):
-    perm_logits = a[i]['mlp.down_trans.x_perm_logits']
+    # perm_logits = a[i]['mlp.down_trans.x_perm_logits']
+    logits1 = a[i]['self_attn.ln_trans.x_mask_gate_logits']
+    r = torch.sigmoid(logits1)
     # print(perm_logits.max(), perm_logits.min())
-    p_soft = _sinkhorn(perm_logits / temp, n_iters=n_iters)
+    # p_soft = _sinkhorn(perm_logits / temp, n_iters=n_iters)
     # permuted = p_soft.transpose(-1, -2) @ matrix_right @ p_soft
-    print(i, p_soft.max(), p_soft.min())
-    if i==0:
-        print(p_soft[0][0])
-        print(perm_logits[0,0])
-    matrix_left, matrix_right = a[0]['self_attn.ln_trans.matrix_left'], a[0]['self_attn.ln_trans.matrix_right']
+    print(i, r.max(), r.min())
+    # if i==0:
+        # print(p_soft[0][0])
+        # print(perm_logits[0,0])
+    # matrix_left, matrix_right = a[0]['self_attn.ln_trans.matrix_left'], a[0]['self_attn.ln_trans.matrix_right']
     # print(matrix_right)
 # print(permuted)
