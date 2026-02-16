@@ -1,4 +1,5 @@
 import torch
+
 a = torch.load("./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260215_014017/flat_matrices.pth")
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260202_003601/flat_matrices.pth
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260208_004512/flat_matrices.pth use_perm 4dim
@@ -20,20 +21,28 @@ def _sinkhorn(logits, n_iters=10):
         log_p = log_p - torch.logsumexp(log_p, dim=-2, keepdim=True)
     return torch.softmax(log_p, dim=-1)
 
-temp = 0.01
-n_iters = 10
+def _collect_gate_logits(state):
+    logits = []
+    for layer_idx in sorted(state.keys()):
+        layer = state[layer_idx]
+        for key, value in layer.items():
+            if key.endswith("x_mask_gate_logits"):
+                logits.append(value.detach().float().flatten())
+    if not logits:
+        return None
+    return torch.cat(logits, dim=0)
 
-for i in range(32):
-    # perm_logits = a[i]['mlp.down_trans.x_perm_logits']
-    logits1 = a[i]['self_attn.ln_trans.x_mask_gate_logits']
-    r = torch.sigmoid(logits1)
-    # print(perm_logits.max(), perm_logits.min())
-    # p_soft = _sinkhorn(perm_logits / temp, n_iters=n_iters)
-    # permuted = p_soft.transpose(-1, -2) @ matrix_right @ p_soft
-    print(i, r.max(), r.min())
-    # if i==0:
-        # print(p_soft[0][0])
-        # print(perm_logits[0,0])
-    # matrix_left, matrix_right = a[0]['self_attn.ln_trans.matrix_left'], a[0]['self_attn.ln_trans.matrix_right']
-    # print(matrix_right)
-# print(permuted)
+
+all_logits = _collect_gate_logits(a)
+if all_logits is None:
+    print("No x_mask_gate_logits found.")
+else:
+    r = torch.sigmoid(all_logits)
+    total = all_logits.numel()
+    ratio_r_lt_0_5 = (r < 0.5).float().mean().item()
+    ratio_logits_lt_0_5 = (all_logits < 0.5).float().mean().item()
+    ratio_logits_lt_0 = (all_logits < 0.0).float().mean().item()
+    print(f"total={total}")
+    print(f"r<0.5 ratio: {ratio_r_lt_0_5:.6f}")
+    print(f"logits<0.5 ratio: {ratio_logits_lt_0_5:.6f}")
+    print(f"logits<0 ratio (same as r<0.5): {ratio_logits_lt_0:.6f}")
