@@ -123,12 +123,33 @@ def _register_obs_hook(model, args, logger):
         return None
 
     captured = {"tensor": None, "tag": None}
+    stats_logged = {"x_q": False}
 
     def _save(tensor, tag):
         if captured["tensor"] is None:
             captured["tensor"] = tensor.detach().cpu()
             captured["tag"] = tag
             logger.info(f"Captured activation at {tag} with shape {tuple(tensor.shape)}")
+
+    def _log_xq_stats(x_q, tag="x_q"):
+        if stats_logged["x_q"]:
+            return
+        with torch.no_grad():
+            total = x_q.numel()
+            if total == 0:
+                return
+            zeros = (x_q == 0)
+            zero_ratio = zeros.float().mean().item()
+            two_zeros_ratio = None
+            if x_q.shape[-1] % 4 == 0:
+                g = x_q.reshape(-1, x_q.shape[-1] // 4, 4)
+                zeros_g = (g == 0).sum(dim=-1)
+                two_zeros_ratio = (zeros_g == 2).float().mean().item()
+            if two_zeros_ratio is None:
+                logger.info(f"[{tag}] zero_ratio={zero_ratio:.6f} (last dim not divisible by 4)")
+            else:
+                logger.info(f"[{tag}] zero_ratio={zero_ratio:.6f}, two_zeros_ratio={two_zeros_ratio:.6f}")
+            stats_logged["x_q"] = True
 
     # FlatQuant path
     if isinstance(target, FlatQuantizedLinear):
@@ -156,6 +177,7 @@ def _register_obs_hook(model, args, logger):
             x_q = target.act_quantizer(x)
             if args.obs_hook_position == "post_quant":
                 _save(x_q, "post_quant")
+            _log_xq_stats(x_q, tag="x_q_train")
             x_q = target._maybe_sparse(x_q, "post_quant")
 
             bias = None
@@ -175,6 +197,7 @@ def _register_obs_hook(model, args, logger):
             x_q = target.act_quantizer(x)
             if args.obs_hook_position == "post_quant":
                 _save(x_q, "post_quant")
+            _log_xq_stats(x_q, tag="x_q_eval")
             x_q = target._maybe_sparse(x_q, "post_quant")
             x_q = x_q.to(x_dtype)
             return target.linear(x_q)
