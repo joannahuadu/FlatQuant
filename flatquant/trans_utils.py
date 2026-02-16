@@ -421,6 +421,34 @@ class SVDDecomposeTransMatrix(nn.Module):
             if alpha < 1.0:
                 mixed = (1.0 - alpha) * reshaped + alpha * mixed
             return mixed.view_as(tensor)
+        if mode == "switch_top2_hard_ste":
+            tau = float(getattr(self, "x_mask_tau", 1.0))
+            if tau <= 0.0:
+                gate_soft = None
+            else:
+                p = torch.softmax(scores / tau, dim=-1)
+                gate_soft = 2.0 * p
+            idx = scores.topk(2, dim=-1).indices
+            gate_hard = torch.zeros_like(reshaped)
+            gate_hard.scatter_(-1, idx, 1.0)
+            gate_raw = gate_hard if gate_soft is None else gate_hard - gate_soft.detach() + gate_soft
+            self._last_x_mask_l2 = (gate_raw.pow(2).sum(dim=-1) - 2.0).pow(2).mean()
+            x_sp = reshaped * gate_raw
+            logits = self.x_mask_gate_logits.to(reshaped)
+            r = torch.sigmoid(logits)
+            self._last_x_mask_gate_mean = r.mean()
+            r_clamped = r.clamp(min=1e-6, max=1.0 - 1e-6)
+            self._last_x_mask_gate_entropy = (
+                -(r_clamped * torch.log(r_clamped) + (1.0 - r_clamped) * torch.log(1.0 - r_clamped)).mean()
+            )
+            if self.training:
+                r_hard = (r > 0.5).to(r)
+                r = r_hard - r.detach() + r
+            r = r.unsqueeze(-1)
+            mixed = r * reshaped + (1.0 - r) * x_sp
+            if alpha < 1.0:
+                mixed = (1.0 - alpha) * reshaped + alpha * mixed
+            return mixed.view_as(tensor)
         if mode == "hard_top2":
             idx = scores.topk(2, dim=-1).indices
             mask = torch.zeros_like(reshaped)
