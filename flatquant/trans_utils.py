@@ -452,9 +452,11 @@ class SVDDecomposeTransMatrix(nn.Module):
             self._last_x_mask_gate_entropy = (
                 -(r_clamped * torch.log(r_clamped) + (1.0 - r_clamped) * torch.log(1.0 - r_clamped)).mean()
             )
-            if self.training:
+            if not self._eval_mode:
                 r_hard = (r > 0.5).to(r)
                 r = r_hard - r.detach() + r
+            else:
+                r = (r > 0.5).to(r)
             r = r.unsqueeze(-1)
             mixed = r * reshaped + (1.0 - r) * x_sp
             if alpha < 1.0:

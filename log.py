@@ -5,6 +5,7 @@ import flatquant.utils as utils
 import flatquant.args_utils as args_utils
 import flatquant.model_utils as model_utils
 import flatquant.data_utils as data_utils
+import flatquant.eval_utils as eval_utils
 import flatquant.train_utils as train_utils
 import flatquant.flat_utils as flat_utils
 import gptq_utils
@@ -53,7 +54,7 @@ def _log_xq_stats(x_q, tag, logger, logged):
         if x_q.shape[-1] % 4 == 0:
             g = x_q.reshape(-1, x_q.shape[-1] // 4, 4)
             zeros_g = (g == 0).sum(dim=-1)
-            two_zeros_ratio = (zeros_g == 2).float().mean().item()
+            two_zeros_ratio = (zeros_g >= 2).float().mean().item()
             logger.info(f"[{tag}] zero_ratio={zero_ratio:.6f}, two_zeros_ratio={two_zeros_ratio:.6f}")
         else:
             logger.info(f"[{tag}] zero_ratio={zero_ratio:.6f} (last dim not divisible by 4)")
@@ -171,8 +172,6 @@ def main():
             )
         dataset_ppl = eval_utils.ppl_eval(model, testloader)
         logger.info(dataset_ppl)
-
-    _maybe_save_heatmap(captured, args, logger)
 
     if args.lm_eval:
         import lm_eval

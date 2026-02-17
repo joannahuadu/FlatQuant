@@ -144,7 +144,7 @@ def _register_obs_hook(model, args, logger):
             if x_q.shape[-1] % 4 == 0:
                 g = x_q.reshape(-1, x_q.shape[-1] // 4, 4)
                 zeros_g = (g == 0).sum(dim=-1)
-                two_zeros_ratio = (zeros_g == 2).float().mean().item()
+                two_zeros_ratio = (zeros_g >= 2).float().mean().item()
             if two_zeros_ratio is None:
                 logger.info(f"[{tag}] zero_ratio={zero_ratio:.6f} (last dim not divisible by 4)")
             else:
