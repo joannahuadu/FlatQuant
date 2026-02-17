@@ -516,6 +516,11 @@ class SVDDecomposeTransMatrix(nn.Module):
                 mask = torch.zeros_like(self._x_mask_err_avg, dtype=torch.bool)
                 mask.scatter_(0, idx, True)
                 self.x_mask_key_mask = mask
+                _, idx_small = torch.topk(self._x_mask_err_avg, k=k, largest=False)
+                mask_small = torch.zeros_like(self._x_mask_err_avg, dtype=torch.bool)
+                mask_small.scatter_(0, idx_small, True)
+                self.x_mask_non_key_mask = mask_small
+                self.x_mask_small_mask = mask_small
 
     def to_eval_mode(self):
         if not self._eval_mode:
