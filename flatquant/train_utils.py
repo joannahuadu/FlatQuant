@@ -194,6 +194,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     num_train_layer = len(layers)
     mse_dict = {}
     perm_logits_by_layer = {}
+    track_x_mask_err = args.x_mask_track_err or args.x_mask_key_ratio is not None or args.x_mask_key_k is not None
+    x_mask_err_by_layer = {}
+    x_mask_err_path = os.path.join(args.exp_dir, "x_mask_err_by_layer.pt")
     for i in range(num_train_layer):
         logger.info(f"========= Layer {i} =========")
         target_layer = None
@@ -245,8 +248,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 if trans.use_x_mask:
                     trans.x_mask_mode = args.x_mask_mode
                     trans.x_mask_tau = args.x_mask_tau
-                    track_err = args.x_mask_track_err or args.x_mask_key_ratio is not None or args.x_mask_key_k is not None
-                    trans.x_mask_track_err = track_err
+                    trans.x_mask_track_err = track_x_mask_err
                     trans.x_mask_key_ratio = args.x_mask_key_ratio
                     trans.x_mask_key_k = args.x_mask_key_k
                     if "switch_top2" in args.x_mask_mode:
@@ -660,6 +662,42 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         _save_stage_ckpt("stage3" if args.use_stage3 else "stage_last")
         for h in hooks:
             h.remove()
+
+        if track_x_mask_err:
+            layer_err = {}
+            for name, trans in (
+                ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                ("mlp.down_trans", layer.mlp.down_trans),
+            ):
+                if trans is None:
+                    continue
+                err = getattr(trans, "_x_mask_err_avg", None)
+                if err is None:
+                    continue
+                entry = {"err_avg": err.detach().cpu()}
+                key_idx = getattr(trans, "x_mask_key_idx", None)
+                if key_idx is not None:
+                    entry["key_idx"] = key_idx.detach().cpu()
+                key_mask = getattr(trans, "x_mask_key_mask", None)
+                if key_mask is not None:
+                    entry["key_mask"] = key_mask.detach().cpu()
+                layer_err[name] = entry
+            if layer_err:
+                x_mask_err_by_layer[i] = layer_err
+                torch.save(
+                    {
+                        "meta": {
+                            "x_mask_key_ratio": args.x_mask_key_ratio,
+                            "x_mask_key_k": args.x_mask_key_k,
+                            "nsamples": args.nsamples,
+                            "cali_bsz": args.cali_bsz,
+                        },
+                        "layers": x_mask_err_by_layer,
+                    },
+                    x_mask_err_path,
+                )
+                logger.info(f"x_mask err stats saved to {x_mask_err_path}")
 
         fp_inps, fp_outs = fp_outs, fp_inps
         layers[i] = layer.to("cpu")
