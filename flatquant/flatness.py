@@ -88,7 +88,20 @@ def get_flatness(args, logger, transform_type=None):
             logger.info("Finished applying FlatQuant to model.")
             flat_utils.load_flat_matrices(args, model, path=args.matrix_path)
             flat_utils.reparameterize_model(
-                model, use_perm=args.use_perm, use_comp_mask=args.use_comp_mask
+                model,
+                use_perm=args.use_perm,
+                use_comp_mask=args.use_comp_mask,
+                use_x_mask=args.use_x_mask,
+                x_mask_mode=args.x_mask_mode,
+                x_mask_tau=args.x_mask_tau,
+                x_mask_r_thr=args.x_mask_r_thr,
+                x_mask_r_mode=args.x_mask_r_mode,
+                x_mask_track_err=args.x_mask_track_err,
+                x_mask_key_ratio=args.x_mask_key_ratio,
+                x_mask_key_k=args.x_mask_key_k,
+                use_x_perm_predictor=args.use_x_perm_predictor,
+                x_perm_num_clusters=args.x_perm_num_clusters,
+                x_perm_pred_hidden=args.x_perm_pred_hidden,
             )
             logger.info("Finished reparameterize model.")
             quant_utils.set_quantizer_state(model, enable=False)

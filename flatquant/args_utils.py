@@ -171,6 +171,12 @@ def parser_gen():
                         help="Weight for energy concentration loss on per-group 4d activations.")
     parser.add_argument("--x_mask_2hot_weight", type=float, default=0.0,
                         help="Weight for encouraging 2-of-4 (two-hot) gates in soft_top2 mode.")
+    parser.add_argument("--x_mask_track_err", action="store_true", default=False,
+                        help="Track per-group x_mask reconstruction error for key-group selection.")
+    parser.add_argument("--x_mask_key_ratio", type=float, default=None,
+                        help="If set, mark top ratio of groups by error as key groups (per trans).")
+    parser.add_argument("--x_mask_key_k", type=int, default=None,
+                        help="If set, mark top-k groups by error as key groups (per trans).")
     parser.add_argument("--use_perm", action=argparse.BooleanOptionalAction, default=True,
                         help="Enable soft permutation during reparameterization.")
     parser.add_argument("--use_comp_mask", action=argparse.BooleanOptionalAction, default=False,

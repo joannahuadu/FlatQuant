@@ -1,4 +1,5 @@
 import torch
+import matplotlib.pyplot as plt
 
 a = torch.load("./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260215_014017/flat_matrices.pth")
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260202_003601/flat_matrices.pth
@@ -46,3 +47,35 @@ else:
     print(f"r<0.5 ratio: {ratio_r_lt_0_5:.6f}")
     print(f"logits<0.5 ratio: {ratio_logits_lt_0_5:.6f}")
     print(f"logits<0 ratio (same as r<0.5): {ratio_logits_lt_0:.6f}")
+
+    print("\nPer-layer r<0.5 ratio:")
+    layer_ids = []
+    layer_ratios = []
+    for layer_idx in sorted(a.keys()):
+        layer = a[layer_idx]
+        layer_logits = []
+        for key, value in layer.items():
+            if key.endswith("x_mask_gate_logits"):
+                layer_logits.append(value.detach().float().flatten())
+        if not layer_logits:
+            print(f"layer {layer_idx}: no x_mask_gate_logits")
+            continue
+        layer_logits = torch.cat(layer_logits, dim=0)
+        layer_r = torch.sigmoid(layer_logits)
+        layer_ratio = (layer_r < 0.5).float().mean().item()
+        print(f"layer {layer_idx}: {layer_ratio:.6f}")
+        layer_ids.append(layer_idx)
+        layer_ratios.append(layer_ratio)
+
+    if layer_ids:
+        plt.figure(figsize=(8, 4))
+        plt.plot(layer_ids, layer_ratios, marker="o", linewidth=1.5)
+        plt.xlabel("Layer")
+        plt.ylabel("Ratio (r < 0.5)")
+        plt.title("Per-layer r<0.5 ratio")
+        plt.grid(True, linestyle="--", alpha=0.4)
+        out_path = "layer_ratio.png"
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=150)
+        plt.close()
+        print(f"\nSaved plot: {out_path}")

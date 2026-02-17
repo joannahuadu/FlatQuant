@@ -245,6 +245,10 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 if trans.use_x_mask:
                     trans.x_mask_mode = args.x_mask_mode
                     trans.x_mask_tau = args.x_mask_tau
+                    track_err = args.x_mask_track_err or args.x_mask_key_ratio is not None or args.x_mask_key_k is not None
+                    trans.x_mask_track_err = track_err
+                    trans.x_mask_key_ratio = args.x_mask_key_ratio
+                    trans.x_mask_key_k = args.x_mask_key_k
                     if "switch_top2" in args.x_mask_mode:
                         if hasattr(trans, "x_mask_gate_logits"):
                             trans.x_mask_gate_logits.data.fill_(0)

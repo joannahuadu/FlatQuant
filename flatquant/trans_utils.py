@@ -185,6 +185,14 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.x_mask_tau = 1.0
         self.x_mask_r_thr = None
         self.x_mask_r_mode = None
+        self.x_mask_track_err = False
+        self.x_mask_key_ratio = None
+        self.x_mask_key_k = None
+        self._x_mask_err_sum = None
+        self._x_mask_err_count = 0
+        self._x_mask_err_avg = None
+        self.x_mask_key_idx = None
+        self.x_mask_key_mask = None
         self.x_mask_gate_logits = nn.Parameter(torch.zeros((left_size * right_size) // 4, dtype=torch.float32), requires_grad=True)
         self._last_x_mask_ent = None
         self._last_x_mask_l2 = None
@@ -362,6 +370,7 @@ class SVDDecomposeTransMatrix(nn.Module):
                 gate_raw = 2.0 * p
             self._last_x_mask_l2 = (gate_raw.pow(2).sum(dim=-1) - 2.0).pow(2).mean()
             x_sp = reshaped * gate_raw
+            self._update_x_mask_err(reshaped, x_sp)
             logits = self.x_mask_gate_logits.to(reshaped)
             r = torch.sigmoid(logits)
             self._last_x_mask_gate_mean = r.mean()
@@ -398,6 +407,7 @@ class SVDDecomposeTransMatrix(nn.Module):
             gate_raw = gate_hard if gate_soft is None else gate_hard - gate_soft.detach() + gate_soft
             self._last_x_mask_l2 = (gate_raw.pow(2).sum(dim=-1) - 2.0).pow(2).mean()
             x_sp = reshaped * gate_raw
+            self._update_x_mask_err(reshaped, x_sp)
             logits = self.x_mask_gate_logits.to(reshaped)
             r = torch.sigmoid(logits)
             self._last_x_mask_gate_mean = r.mean()
@@ -434,6 +444,7 @@ class SVDDecomposeTransMatrix(nn.Module):
             gate_raw = gate_hard if gate_soft is None else gate_hard - gate_soft.detach() + gate_soft
             self._last_x_mask_l2 = (gate_raw.pow(2).sum(dim=-1) - 2.0).pow(2).mean()
             x_sp = reshaped * gate_raw
+            self._update_x_mask_err(reshaped, x_sp)
             logits = self.x_mask_gate_logits.to(reshaped)
             r = torch.sigmoid(logits)
             self._last_x_mask_gate_mean = r.mean()
@@ -474,6 +485,35 @@ class SVDDecomposeTransMatrix(nn.Module):
         out = reshaped.clone()
         out[..., 2:4] = out[..., 2:4] * (1.0 - alpha)
         return out.view_as(tensor)
+
+    def _update_x_mask_err(self, reshaped, x_sp):
+        if not getattr(self, "x_mask_track_err", False):
+            return
+        with torch.no_grad():
+            diff = (x_sp - reshaped).float().pow(2)
+            dims = list(range(diff.dim()))
+            # keep group dimension (-2), reduce others
+            if len(dims) >= 2:
+                dims.pop(-2)
+            err = diff.mean(dim=dims)
+            if self._x_mask_err_sum is None:
+                self._x_mask_err_sum = err.detach()
+            else:
+                self._x_mask_err_sum = self._x_mask_err_sum + err.detach()
+            self._x_mask_err_count += 1
+            self._x_mask_err_avg = self._x_mask_err_sum / float(self._x_mask_err_count)
+            k = None
+            if self.x_mask_key_k is not None:
+                k = int(self.x_mask_key_k)
+            elif self.x_mask_key_ratio is not None:
+                k = int(max(1, round(self._x_mask_err_avg.numel() * float(self.x_mask_key_ratio))))
+            if k is not None:
+                k = min(k, self._x_mask_err_avg.numel())
+                _, idx = torch.topk(self._x_mask_err_avg, k=k, largest=True)
+                self.x_mask_key_idx = idx
+                mask = torch.zeros_like(self._x_mask_err_avg, dtype=torch.bool)
+                mask.scatter_(0, idx, True)
+                self.x_mask_key_mask = mask
 
     def to_eval_mode(self):
         if not self._eval_mode:
