@@ -685,9 +685,6 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 non_key_mask = getattr(trans, "x_mask_non_key_mask", None)
                 if non_key_mask is not None:
                     entry["non_key_mask"] = non_key_mask.detach().cpu()
-                small_mask = getattr(trans, "x_mask_small_mask", None)
-                if small_mask is not None:
-                    entry["mask_small"] = small_mask.detach().cpu()
                 layer_err[name] = entry
             if layer_err:
                 x_mask_err_by_layer[i] = layer_err
