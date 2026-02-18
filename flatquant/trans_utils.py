@@ -411,7 +411,10 @@ class SVDDecomposeTransMatrix(nn.Module):
             x_sp = reshaped * gate_raw
             self._update_x_mask_err(reshaped, x_sp)
             logits = self.x_mask_gate_logits.to(reshaped)
-            r = torch.sigmoid(logits)
+            if self.x_mask_track_err:
+                r = torch.ones(logits.size(), dtype=logits.dtype).to(logits)
+            else:
+                r = torch.sigmoid(logits)
             self._last_x_mask_gate_mean = r.mean()
             r_clamped = r.clamp(min=1e-6, max=1.0 - 1e-6)
             self._last_x_mask_gate_entropy = (
