@@ -203,6 +203,11 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     if track_x_mask_err and x_mask_err_dir:
         os.makedirs(x_mask_err_dir, exist_ok=True)
     x_mask_err_path = os.path.join(x_mask_err_dir, "x_mask_err_by_layer.pt") if x_mask_err_dir else None
+    if track_x_mask_err and x_mask_err_path and os.path.exists(x_mask_err_path):
+        raise FileExistsError(
+            f"x_mask err file already exists: {x_mask_err_path}. "
+            "Refusing to overwrite; please remove it or choose a new x_mask_err_dir."
+        )
     x_mask_err_data = None
     for i in range(num_train_layer):
         logger.info(f"========= Layer {i} =========")
