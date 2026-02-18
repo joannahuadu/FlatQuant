@@ -414,8 +414,8 @@ class SVDDecomposeTransMatrix(nn.Module):
             self._update_x_mask_err(reshaped, x_sp)
             logits = self.x_mask_gate_logits.to(reshaped)
             r = None
-            if getattr(self, "x_mask_use_err", False):
-                use_non_key = getattr(self, "x_mask_use_non_key", False)
+            if self.x_mask_use_err:
+                use_non_key = self.x_mask_use_non_key
                 idx = self.x_mask_non_key_idx if use_non_key else self.x_mask_key_idx
                 if idx is not None:
                     if not torch.is_tensor(idx):
