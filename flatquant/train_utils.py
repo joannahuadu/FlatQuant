@@ -197,6 +197,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     track_x_mask_err = args.x_mask_track_err or args.x_mask_key_ratio is not None or args.x_mask_key_k is not None
     x_mask_err_by_layer = {}
     x_mask_err_path = os.path.join(args.exp_dir, "x_mask_err_by_layer.pt")
+    load_x_mask_err = args.x_mask_use_err
+    x_mask_err_data = None
     for i in range(num_train_layer):
         logger.info(f"========= Layer {i} =========")
         target_layer = None
@@ -294,6 +296,47 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     )
                     logger.info(f"x_mask err stats saved to {x_mask_err_path}")
                     
+            fp_inps, fp_outs = fp_outs, fp_inps
+            layers[i] = layer.to("cpu")
+            del layer
+            torch.cuda.empty_cache()
+            continue
+
+        if load_x_mask_err:
+            if x_mask_err_data is None:
+                if not os.path.exists(x_mask_err_path):
+                    raise FileNotFoundError(f"x_mask err file not found: {x_mask_err_path}")
+                x_mask_err_data = torch.load(x_mask_err_path, map_location="cpu")
+            layer_err = x_mask_err_data.get("layers", {}).get(i, {})
+            if not layer_err:
+                logger.warning(f"No x_mask err data for layer {i} in {x_mask_err_path}")
+            for name, trans in (
+                ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                ("mlp.down_trans", layer.mlp.down_trans),
+            ):
+                trans.use_x_perm = args.use_x_perm
+                trans.use_x_mask = args.use_x_mask
+                if trans.use_x_mask:
+                    trans.x_mask_mode = args.x_mask_mode
+                    trans.x_mask_tau = args.x_mask_tau
+                    trans.x_mask_track_err = False
+                    trans.x_mask_key_ratio = args.x_mask_key_ratio
+                    trans.x_mask_key_k = args.x_mask_key_k
+                    trans.x_mask_use_err = True
+                    trans.x_mask_use_non_key = args.x_mask_use_non_key
+                entry = layer_err.get(name, None) if isinstance(layer_err, dict) else None
+                if entry:
+                    key_idx = entry.get("key_idx", None)
+                    if key_idx is not None:
+                        trans.x_mask_key_idx = key_idx.to(device=dev, dtype=torch.long)
+                    non_key_idx = entry.get("non_key_idx", None)
+                    if non_key_idx is not None:
+                        trans.x_mask_non_key_idx = non_key_idx.to(device=dev, dtype=torch.long)
+            with torch.no_grad():
+                for j in range(args.nsamples // args.cali_bsz):
+                    index = j * args.cali_bsz
+                    _ = layer(fp_inps[index:index+args.cali_bsz,], attention_mask=attention_mask_batch, position_ids=position_ids)[0]
             fp_inps, fp_outs = fp_outs, fp_inps
             layers[i] = layer.to("cpu")
             del layer

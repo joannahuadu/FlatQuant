@@ -188,6 +188,8 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.x_mask_track_err = False
         self.x_mask_key_ratio = None
         self.x_mask_key_k = None
+        self.x_mask_use_err = False
+        self.x_mask_use_non_key = False
         self._x_mask_err_sum = None
         self._x_mask_err_count = 0
         self._x_mask_err_avg = None
@@ -411,10 +413,22 @@ class SVDDecomposeTransMatrix(nn.Module):
             x_sp = reshaped * gate_raw
             self._update_x_mask_err(reshaped, x_sp)
             logits = self.x_mask_gate_logits.to(reshaped)
-            if self.x_mask_track_err:
-                r = torch.ones(logits.size(), dtype=logits.dtype).to(logits)
-            else:
-                r = torch.sigmoid(logits)
+            r = None
+            if getattr(self, "x_mask_use_err", False):
+                use_non_key = getattr(self, "x_mask_use_non_key", False)
+                idx = self.x_mask_non_key_idx if use_non_key else self.x_mask_key_idx
+                if idx is not None:
+                    if not torch.is_tensor(idx):
+                        idx = torch.tensor(idx, dtype=torch.long, device=logits.device)
+                    else:
+                        idx = idx.to(device=logits.device, dtype=torch.long)
+                    r = torch.ones_like(logits)
+                    r[idx] = 0.0
+            if r is None:
+                if self.x_mask_track_err:
+                    r = torch.ones_like(logits)
+                else:
+                    r = torch.sigmoid(logits)
             self._last_x_mask_gate_mean = r.mean()
             r_clamped = r.clamp(min=1e-6, max=1.0 - 1e-6)
             self._last_x_mask_gate_entropy = (

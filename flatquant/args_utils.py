@@ -173,6 +173,10 @@ def parser_gen():
                         help="Weight for encouraging 2-of-4 (two-hot) gates in soft_top2 mode.")
     parser.add_argument("--x_mask_track_err", action="store_true", default=False,
                         help="Track per-group x_mask reconstruction error for key-group selection.")
+    parser.add_argument("--x_mask_use_err", action="store_true", default=False,
+                        help="Load x_mask_err_by_layer.pt and use saved key/non-key indices.")
+    parser.add_argument("--x_mask_use_non_key", action="store_true", default=False,
+                        help="Use non-key indices (instead of key indices) when building r.")
     parser.add_argument("--x_mask_key_ratio", type=float, default=None,
                         help="If set, mark top ratio of groups by error as key groups (per trans).")
     parser.add_argument("--x_mask_key_k", type=int, default=None,
