@@ -173,6 +173,8 @@ def parser_gen():
                         help="Weight for encouraging 2-of-4 (two-hot) gates in soft_top2 mode.")
     parser.add_argument("--x_mask_track_err", action="store_true", default=False,
                         help="Track per-group x_mask reconstruction error for key-group selection.")
+    parser.add_argument("--x_mask_err_dir", type=str, default=None,
+                        help="Directory to save/load x_mask_err_by_layer.pt (required if tracking or using err).")
     parser.add_argument("--x_mask_use_err", action="store_true", default=False,
                         help="Load x_mask_err_by_layer.pt and use saved key/non-key indices.")
     parser.add_argument("--x_mask_use_non_key", action="store_true", default=False,
