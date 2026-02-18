@@ -194,7 +194,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     num_train_layer = len(layers)
     mse_dict = {}
     perm_logits_by_layer = {}
-    track_x_mask_err = args.x_mask_track_err or args.x_mask_key_ratio is not None or args.x_mask_key_k is not None
+    track_x_mask_err = args.x_mask_track_err
     x_mask_err_by_layer = {}
     load_x_mask_err = args.x_mask_use_err
     x_mask_err_dir = args.x_mask_err_dir
