@@ -196,8 +196,13 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     perm_logits_by_layer = {}
     track_x_mask_err = args.x_mask_track_err or args.x_mask_key_ratio is not None or args.x_mask_key_k is not None
     x_mask_err_by_layer = {}
-    x_mask_err_path = os.path.join(args.exp_dir, "x_mask_err_by_layer.pt")
     load_x_mask_err = args.x_mask_use_err
+    x_mask_err_dir = args.x_mask_err_dir
+    if (track_x_mask_err or load_x_mask_err) and not x_mask_err_dir:
+        raise ValueError("x_mask_err_dir is required when tracking or using x_mask err data.")
+    if track_x_mask_err and x_mask_err_dir:
+        os.makedirs(x_mask_err_dir, exist_ok=True)
+    x_mask_err_path = os.path.join(x_mask_err_dir, "x_mask_err_by_layer.pt") if x_mask_err_dir else None
     x_mask_err_data = None
     for i in range(num_train_layer):
         logger.info(f"========= Layer {i} =========")
