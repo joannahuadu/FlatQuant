@@ -308,6 +308,10 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     
             fp_inps, fp_outs = fp_outs, fp_inps
             layers[i] = layer.to("cpu")
+            for name, param in layer.named_parameters():
+                param.requires_grad = False
+                if name in dtype_dict.keys():
+                    param.data = param.to(dtype_dict[name])
             del layer
             torch.cuda.empty_cache()
             continue
@@ -349,6 +353,10 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     _ = layer(fp_inps[index:index+args.cali_bsz,], attention_mask=attention_mask_batch, position_ids=position_ids)[0]
             fp_inps, fp_outs = fp_outs, fp_inps
             layers[i] = layer.to("cpu")
+            for name, param in layer.named_parameters():
+                param.requires_grad = False
+                if name in dtype_dict.keys():
+                    param.data = param.to(dtype_dict[name])
             del layer
             torch.cuda.empty_cache()
             continue
