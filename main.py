@@ -95,6 +95,9 @@ def main():
             quantizers = gptq_utils.rtn_fwrd(model, utils.DEV, args)
         save_dict["w_quantizers"] = quantizers
 
+    if args.x_mask_track_err or args.x_mask_use_err:
+        train_utils.cali_sparse(args, model, trainloader, utils.DEV, logger)
+
     ## save quantized weight
     if args.quantized_save:
         flat_utils.save_quantized_weights_with_safetensors(args, model, quantizers)
