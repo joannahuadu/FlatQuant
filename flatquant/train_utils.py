@@ -116,7 +116,7 @@ def _target_left_svals(target_left, cur_size):
     return torch.cat([svals, pad], dim=0)
 
 def cali_sparse(args, model, dataloader, dev, logger):
-    track_x_mask_err = args.x_mask_track_err or args.x_mask_key_ratio is not None or args.x_mask_key_k is not None
+    track_x_mask_err = args.x_mask_track_err
     load_x_mask_err = args.x_mask_use_err
     if not (track_x_mask_err or load_x_mask_err):
         return model
@@ -481,7 +481,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     trans.x_mask_key_k = args.x_mask_key_k
                     if "switch_top2" in args.x_mask_mode:
                         if hasattr(trans, "x_mask_gate_logits"):
-                            trans.x_mask_gate_logits.data.fill_(1)
+                            trans.x_mask_gate_logits.data.fill_(-2)
                 trans.use_x_perm_predictor = args.use_x_perm_predictor
                 if trans.use_x_perm_predictor and trans.x_perm_predictor is None:
                     num_blocks = trans.hidden_dim // trans.block_size

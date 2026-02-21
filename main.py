@@ -68,19 +68,20 @@ def main():
             train_utils.cali_flat_quant(args, model, trainloader, utils.DEV, logger=logger)
         if args.save_matrix and not args.reload_matrix:
             flat_utils.save_flat_matrices(args, model)
+        if args.x_mask_track_err or args.x_mask_use_err:
+            use_x_mask = False
+        else:
+            use_x_mask = args.use_x_mask
         flat_utils.reparameterize_model(
             model,
             use_x_perm=args.use_x_perm,
             use_perm=args.use_perm,
             use_comp_mask=args.use_comp_mask,
-            use_x_mask=args.use_x_mask,
+            use_x_mask=use_x_mask,
             x_mask_mode=args.x_mask_mode,
             x_mask_tau=args.x_mask_tau,
             x_mask_r_thr=args.x_mask_r_thr,
             x_mask_r_mode=args.x_mask_r_mode,
-            x_mask_track_err=args.x_mask_track_err,
-            x_mask_key_ratio=args.x_mask_key_ratio,
-            x_mask_key_k=args.x_mask_key_k,
             use_x_perm_predictor=args.use_x_perm_predictor,
             x_perm_num_clusters=args.x_perm_num_clusters,
             x_perm_pred_hidden=args.x_perm_pred_hidden,
