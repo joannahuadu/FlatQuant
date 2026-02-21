@@ -92,6 +92,7 @@ def get_flatness(args, logger, transform_type=None):
                 use_perm=args.use_perm,
                 use_comp_mask=args.use_comp_mask,
                 use_x_mask=args.use_x_mask,
+                use_x_mask_comp=args.x_mask_use_comp,
                 x_mask_mode=args.x_mask_mode,
                 x_mask_tau=args.x_mask_tau,
                 x_mask_r_thr=args.x_mask_r_thr,

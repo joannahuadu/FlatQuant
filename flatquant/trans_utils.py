@@ -198,6 +198,8 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.x_mask_non_key_mask = None
         self.x_mask_non_key_idx = None
         self.x_mask_gate_logits = nn.Parameter(torch.zeros((left_size * right_size) // 4, dtype=torch.float32), requires_grad=True)
+        self.use_x_mask_comp = False
+        self.x_mask_comp = nn.Parameter(torch.ones((left_size * right_size) // 4, dtype=torch.float32), requires_grad=False)
         self._last_x_mask_ent = None
         self._last_x_mask_l2 = None
         self._last_x_mask_gate_mean = None
@@ -394,7 +396,11 @@ class SVDDecomposeTransMatrix(nn.Module):
                     idx = mixed.abs().topk(2, dim=-1).indices
                     hard_mask = torch.zeros_like(reshaped)
                     hard_mask.scatter_(-1, idx, 1.0)
-                mixed = mixed * (1.0 - hard_sel + hard_sel * hard_mask)
+                if getattr(self, "use_x_mask_comp", False) and self.x_mask_comp is not None:
+                    comp = self.x_mask_comp.to(mixed).unsqueeze(-1)
+                    mixed = mixed * (1.0 - hard_sel + hard_sel * hard_mask * comp)
+                else:
+                    mixed = mixed * (1.0 - hard_sel + hard_sel * hard_mask)
             if alpha < 1.0:
                 mixed = (1.0 - alpha) * reshaped + alpha * mixed
             return mixed.view_as(tensor)
@@ -446,7 +452,11 @@ class SVDDecomposeTransMatrix(nn.Module):
                     idx = mixed.abs().topk(2, dim=-1).indices
                     hard_mask = torch.zeros_like(reshaped)
                     hard_mask.scatter_(-1, idx, 1.0)
-                mixed = mixed * (1.0 - hard_sel + hard_sel * hard_mask)
+                if getattr(self, "use_x_mask_comp", False) and self.x_mask_comp is not None:
+                    comp = self.x_mask_comp.to(mixed).unsqueeze(-1)
+                    mixed = mixed * (1.0 - hard_sel + hard_sel * hard_mask * comp)
+                else:
+                    mixed = mixed * (1.0 - hard_sel + hard_sel * hard_mask)
             if alpha < 1.0:
                 mixed = (1.0 - alpha) * reshaped + alpha * mixed
             return mixed.view_as(tensor)

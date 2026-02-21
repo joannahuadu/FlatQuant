@@ -115,6 +115,78 @@ def _target_left_svals(target_left, cur_size):
     pad = torch.zeros(cur_size - svals.numel(), dtype=svals.dtype, device=svals.device)
     return torch.cat([svals, pad], dim=0)
 
+
+def _get_linear_weight(mod):
+    if mod is None:
+        return None
+    if hasattr(mod, "linear") and isinstance(mod.linear, nn.Linear):
+        return mod.linear.weight
+    if isinstance(mod, nn.Linear):
+        return mod.weight
+    return None
+
+
+def _collect_trans_weights(layer, trans_name):
+    weights = []
+    if trans_name == "self_attn.ln_trans":
+        attn = getattr(layer, "self_attn", None)
+        for name in ("q_proj", "k_proj", "v_proj"):
+            mod = getattr(attn, name, None) if attn is not None else None
+            w = _get_linear_weight(mod)
+            if w is not None:
+                weights.append(w)
+    elif trans_name == "mlp.up_gate_trans":
+        mlp = getattr(layer, "mlp", None)
+        for name in ("up_proj", "gate_proj", "w3", "w1"):
+            mod = getattr(mlp, name, None) if mlp is not None else None
+            w = _get_linear_weight(mod)
+            if w is not None:
+                weights.append(w)
+    elif trans_name == "mlp.down_trans":
+        mlp = getattr(layer, "mlp", None)
+        for name in ("down_proj", "w2"):
+            mod = getattr(mlp, name, None) if mlp is not None else None
+            w = _get_linear_weight(mod)
+            if w is not None:
+                weights.append(w)
+    return weights
+
+
+def _compute_group_hessian(weights, hidden_dim):
+    num_groups = hidden_dim // 4
+    H = None
+    for W in weights:
+        if W is None:
+            continue
+        if W.shape[1] != hidden_dim:
+            continue
+        Wg = W.float().view(W.shape[0], num_groups, 4)
+        Hg = torch.einsum("ogk,ogh->gkh", Wg, Wg)
+        H = Hg if H is None else H + Hg
+    return H
+
+
+def _compute_r_for_trans(trans, mode):
+    logits = trans.x_mask_gate_logits
+    if mode == "switch_top2_soft":
+        return torch.sigmoid(logits)
+    if mode == "switch_top2_hard":
+        if trans.x_mask_use_err:
+            use_non_key = trans.x_mask_use_non_key
+            idx = trans.x_mask_non_key_idx if use_non_key else trans.x_mask_key_idx
+            r = torch.ones_like(logits)
+            if idx is not None:
+                if not torch.is_tensor(idx):
+                    idx = torch.tensor(idx, dtype=torch.long, device=logits.device)
+                else:
+                    idx = idx.to(device=logits.device, dtype=torch.long)
+                r[idx] = 0.0
+            return r
+        if trans.x_mask_track_err:
+            return torch.ones_like(logits)
+        return torch.sigmoid(logits)
+    return torch.sigmoid(logits)
+
 def cali_sparse(args, model, dataloader, dev, logger):
     track_x_mask_err = args.x_mask_track_err
     load_x_mask_err = args.x_mask_use_err
@@ -336,6 +408,254 @@ def cali_sparse(args, model, dataloader, dev, logger):
             del layer
             torch.cuda.empty_cache()
             continue
+
+    del inps, fp_inps, fp_outs
+    gc.collect()
+    torch.cuda.empty_cache()
+    model.config.use_cache = use_cache
+    return model
+
+
+def cali_x_mask_comp(args, model, dataloader, dev, logger):
+    if not getattr(args, "x_mask_use_comp", False):
+        return model
+    if not args.use_x_mask:
+        return model
+    if args.x_mask_r_thr is None:
+        logger.warning("x_mask_comp: x_mask_r_thr is None, skip compensation calibration.")
+        return model
+    if args.x_mask_mode not in ("switch_top2_soft", "switch_top2_hard"):
+        logger.warning(f"x_mask_comp: unsupported x_mask_mode={args.x_mask_mode}, skip.")
+        return model
+
+    model.eval()
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+
+    for name, param in model.named_parameters():
+        param.requires_grad = False
+
+    if args.deactive_amp:
+        dtype = torch.float32
+    else:
+        dtype = torch.float16 if isinstance(model, transformers.LlamaForCausalLM) else torch.bfloat16
+
+    layers = model.model.layers
+    layers[0] = layers[0].to(dev)
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.to(dev)
+
+    inps = torch.zeros(
+        (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
+    )
+    cache = {"i": 0}
+
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, inp, **kwargs):
+            inps[cache["i"]] = inp
+            cache["i"] += 1
+            cache["attention_mask"] = kwargs["attention_mask"]
+            cache["position_ids"] = kwargs["position_ids"]
+            raise ValueError
+
+    layers[0] = Catcher(layers[0])
+    with torch.no_grad():
+        for batch in dataloader:
+            if cache["i"] >= args.nsamples:
+                break
+            try:
+                sample = batch[0]
+                model(sample.to(dev))
+            except ValueError:
+                pass
+
+    position_ids = cache["position_ids"]
+    attention_mask = cache["attention_mask"]
+    if attention_mask is not None:
+        attention_mask_batch = attention_mask.repeat(args.cali_bsz, 1, 1, 1).float()
+    else:
+        attention_mask_batch = None
+
+    layers[0] = layers[0].module
+    layers[0] = layers[0].cpu()
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.cpu()
+    torch.cuda.empty_cache()
+
+    fp_inps = inps
+    fp_outs = torch.zeros_like(inps)
+    ref_outs = torch.zeros_like(inps)
+    loss_func = torch.nn.MSELoss()
+    
+    def _make_comp_hook(stats):
+        def _hook(module, inp, out):
+            if out is None:
+                return
+            x = out[0] if isinstance(out, (tuple, list)) else out
+            x = x.float()
+            x = x.view(-1, stats["num_groups"], 4)
+            scores = x.abs()
+            tau = stats["tau"]
+            if stats["mode"] == "switch_top2_soft":
+                if tau <= 0.0:
+                    idx = scores.topk(2, dim=-1).indices
+                    gate_raw = torch.zeros_like(x)
+                    gate_raw.scatter_(-1, idx, 1.0)
+                else:
+                    p = torch.softmax(scores / tau, dim=-1)
+                    gate_raw = 2.0 * p
+            else:
+                idx = scores.topk(2, dim=-1).indices
+                gate_raw = torch.zeros_like(x)
+                gate_raw.scatter_(-1, idx, 1.0)
+
+            x_sp = x * gate_raw
+            r = stats["r"].to(x).unsqueeze(0).unsqueeze(-1)
+            mixed = r * x + (1.0 - r) * x_sp
+
+            if stats["hard_mode"] == "gate_raw":
+                hard_mask = gate_raw
+            else:
+                idx = mixed.abs().topk(2, dim=-1).indices
+                hard_mask = torch.zeros_like(x)
+                hard_mask.scatter_(-1, idx, 1.0)
+
+            sparse = mixed * hard_mask
+            H = stats["H"].to(x)
+            Hx = torch.einsum("bgi,gij->bgj", mixed, H)
+            Hx_sp = torch.einsum("bgi,gij->bgj", sparse, H)
+            num = (sparse * Hx).sum(dim=-1)
+            den = (sparse * Hx_sp).sum(dim=-1)
+            if stats["sel"] is not None:
+                sel = stats["sel"].to(x).unsqueeze(0)
+                num = num * sel
+                den = den * sel
+            stats["num"] += num.sum(dim=0)
+            stats["den"] += den.sum(dim=0)
+        return _hook
+
+    for i in range(len(layers)):
+        logger.info(f"x_mask_comp: layer {i}")
+        layer = layers[i].to(dev)
+        dtype_dict = {name: param.dtype for name, param in layer.named_parameters()}
+        with torch.no_grad():
+            layer.float()
+ 
+        layer.self_attn._ori_mode = True
+        layer.mlp._ori_mode = True
+        with torch.no_grad():
+            for j in range(args.nsamples):
+                ref_outs[j] = layer(fp_inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+        layer.self_attn._ori_mode = False
+        layer.mlp._ori_mode = False
+        layer = layer.to(dev)
+        stats_by_trans = {}
+        for name, trans in (
+            ("self_attn.ln_trans", layer.self_attn.ln_trans),
+            ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+            ("mlp.down_trans", layer.mlp.down_trans),
+        ):
+            if trans is None or not getattr(trans, "use_x_mask", False):
+                continue
+            if trans.x_mask_r_thr is None:
+                continue
+            if trans.x_mask_mode not in ("switch_top2_soft", "switch_top2_hard"):
+                continue
+            weights = _collect_trans_weights(layer, name)
+            if len(weights) == 0:
+                continue
+            H = _compute_group_hessian(weights, trans.hidden_dim)
+            if H is None:
+                continue
+            r = _compute_r_for_trans(trans, trans.x_mask_mode)
+            sel = (r < trans.x_mask_r_thr).float()
+            stats_by_trans[name] = {
+                "num_groups": trans.hidden_dim // 4,
+                "H": H,
+                "r": r,
+                "sel": sel,
+                "mode": trans.x_mask_mode,
+                "tau": float(getattr(trans, "x_mask_tau", 1.0)),
+                "hard_mode": getattr(trans, "x_mask_r_mode", "top2"),
+                "num": torch.zeros_like(r, device=H.device, dtype=H.dtype),
+                "den": torch.zeros_like(r, device=H.device, dtype=H.dtype),
+            }
+
+        hooks = []
+        for name, trans in (
+            ("self_attn.ln_trans", layer.self_attn.ln_trans),
+            ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+            ("mlp.down_trans", layer.mlp.down_trans),
+        ):
+            stats = stats_by_trans.get(name, None)
+            if stats is None:
+                continue
+            hooks.append(trans.register_forward_hook(_make_comp_hook(stats)))
+
+        mse_pre = 0
+        with torch.no_grad():
+            for j in range(args.nsamples // args.cali_bsz):
+                index = j * args.cali_bsz
+                out = layer(
+                    fp_inps[index:index + args.cali_bsz],
+                    attention_mask=attention_mask_batch,
+                    position_ids=position_ids,
+                )[0]
+                loss = loss_func(ref_outs[index:index + args.cali_bsz], out)
+                mse_pre += loss.detach().cpu()
+
+        for h in hooks:
+            h.remove()
+
+        for name, trans in (
+            ("self_attn.ln_trans", layer.self_attn.ln_trans),
+            ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+            ("mlp.down_trans", layer.mlp.down_trans),
+        ):
+            stats = stats_by_trans.get(name, None)
+            if stats is None:
+                continue
+            den = stats["den"]
+            num = stats["num"]
+            eps = 1e-6
+            comp = num / (den + eps)
+            bad = (~torch.isfinite(comp)) | (den <= eps)
+            comp = torch.where(bad, torch.ones_like(comp), comp)
+            sel = stats["sel"]
+            if sel is not None:
+                comp = torch.where(sel > 0, comp, torch.ones_like(comp))
+            if hasattr(trans, "x_mask_comp") and trans.x_mask_comp is not None:
+                trans.x_mask_comp.data.copy_(comp.to(trans.x_mask_comp.device, dtype=trans.x_mask_comp.dtype))
+                trans.use_x_mask_comp = True
+
+        mse_post = 0
+        with torch.no_grad():
+            for j in range(args.nsamples // args.cali_bsz):
+                index = j * args.cali_bsz
+                out = layer(
+                    fp_inps[index:index + args.cali_bsz],
+                    attention_mask=attention_mask_batch,
+                    position_ids=position_ids,
+                )[0]
+                fp_outs[index:index + args.cali_bsz] = out
+                loss = loss_func(ref_outs[index:index + args.cali_bsz], out)
+                mse_post += loss.detach().cpu()
+
+        logger.info(f"x_mask_comp: layer {i} recon mse pre={float(mse_pre):.6f} post={float(mse_post):.6f}")
+
+        for name, param in layer.named_parameters():
+            if name in dtype_dict:
+                param.data = param.to(dtype_dict[name])
+        fp_inps, fp_outs = fp_outs, fp_inps
+        layers[i] = layer.to("cpu")
+        del layer
+        torch.cuda.empty_cache()
 
     del inps, fp_inps, fp_outs
     gc.collect()
