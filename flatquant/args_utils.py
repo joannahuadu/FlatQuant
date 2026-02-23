@@ -161,7 +161,7 @@ def parser_gen():
                         choices=["top2", "gate_raw"],
                         help="Hard mask source for r < thr in switch_top2 modes: "
                              "top2 uses mixed activations; gate_raw uses the raw gate.")
-    parser.add_argument("--x_mask_use_comp", action="store_true", default=False,
+    parser.add_argument("--use_x_mask_comp", action="store_true", default=False,
                         help="Apply per-group compensation scalar for r < thr sparse path "
                              "(requires trans.x_mask_comp to be set).")
     parser.add_argument("--x_mask_gate_cost", type=float, default=0.0,

@@ -168,23 +168,6 @@ def _compute_group_hessian(weights, hidden_dim):
 
 def _compute_r_for_trans(trans, mode):
     logits = trans.x_mask_gate_logits
-    if mode == "switch_top2_soft":
-        return torch.sigmoid(logits)
-    if mode == "switch_top2_hard":
-        if trans.x_mask_use_err:
-            use_non_key = trans.x_mask_use_non_key
-            idx = trans.x_mask_non_key_idx if use_non_key else trans.x_mask_key_idx
-            r = torch.ones_like(logits)
-            if idx is not None:
-                if not torch.is_tensor(idx):
-                    idx = torch.tensor(idx, dtype=torch.long, device=logits.device)
-                else:
-                    idx = idx.to(device=logits.device, dtype=torch.long)
-                r[idx] = 0.0
-            return r
-        if trans.x_mask_track_err:
-            return torch.ones_like(logits)
-        return torch.sigmoid(logits)
     return torch.sigmoid(logits)
 
 def cali_sparse(args, model, dataloader, dev, logger):
@@ -417,7 +400,7 @@ def cali_sparse(args, model, dataloader, dev, logger):
 
 
 def cali_x_mask_comp(args, model, dataloader, dev, logger):
-    if not getattr(args, "x_mask_use_comp", False):
+    if not getattr(args, "use_x_mask_comp", False):
         return model
     if not args.use_x_mask:
         return model
@@ -593,6 +576,7 @@ def cali_x_mask_comp(args, model, dataloader, dev, logger):
             ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
             ("mlp.down_trans", layer.mlp.down_trans),
         ):
+            trans.use_x_mask = False
             stats = stats_by_trans.get(name, None)
             if stats is None:
                 continue
