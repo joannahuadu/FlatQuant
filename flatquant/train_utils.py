@@ -612,14 +612,6 @@ def cali_x_mask_fixed(args, model, dataloader, dev, logger):
 def cali_x_mask_comp(args, model, dataloader, dev, logger):
     if not getattr(args, "use_x_mask_comp", False):
         return model
-    if not args.use_x_mask:
-        return model
-    if args.x_mask_r_thr is None:
-        logger.warning("x_mask_comp: x_mask_r_thr is None, skip compensation calibration.")
-        return model
-    if args.x_mask_mode not in ("switch_top2_soft", "switch_top2_hard"):
-        logger.warning(f"x_mask_comp: unsupported x_mask_mode={args.x_mask_mode}, skip.")
-        return model
 
     model.eval()
     use_cache = model.config.use_cache
@@ -688,10 +680,8 @@ def cali_x_mask_comp(args, model, dataloader, dev, logger):
     
     def _make_comp_hook(stats):
         def _hook(module, inp, out):
-            if out is None:
-                return
-            x = out[0] if isinstance(out, (tuple, list)) else out
-            x = x.float()
+            x0 = out[0] if isinstance(out, (tuple, list)) else out
+            x = x0.float()
             x = x.view(-1, stats["num_groups"], 4)
             scores = x.abs()
             tau = stats["tau"]
@@ -709,17 +699,21 @@ def cali_x_mask_comp(args, model, dataloader, dev, logger):
                 gate_raw.scatter_(-1, idx, 1.0)
 
             x_sp = x * gate_raw
-            r = stats["r"].to(x).unsqueeze(0).unsqueeze(-1)
-            mixed = r * x + (1.0 - r) * x_sp
+            if "switch" in stats["mode"]:
+                r = stats["r"].to(x).unsqueeze(0).unsqueeze(-1)
+                mixed = r * x + (1.0 - r) * x_sp
 
-            if stats["hard_mode"] == "gate_raw":
-                hard_mask = gate_raw
+                if stats["hard_mode"] == "gate_raw":
+                    hard_mask = gate_raw
+                else:
+                    idx = mixed.abs().topk(2, dim=-1).indices
+                    hard_mask = torch.zeros_like(x)
+                    hard_mask.scatter_(-1, idx, 1.0)
+
+                sparse = mixed * hard_mask
             else:
-                idx = mixed.abs().topk(2, dim=-1).indices
-                hard_mask = torch.zeros_like(x)
-                hard_mask.scatter_(-1, idx, 1.0)
-
-            sparse = mixed * hard_mask
+                sparse = x_sp
+                mixed = x
             H = stats["H"].to(x)
             Hx = torch.einsum("bgi,gij->bgj", mixed, H)
             Hx_sp = torch.einsum("bgi,gij->bgj", sparse, H)
@@ -731,6 +725,14 @@ def cali_x_mask_comp(args, model, dataloader, dev, logger):
                 den = den * sel
             stats["num"] += num.sum(dim=0)
             stats["den"] += den.sum(dim=0)
+            mixed_out = mixed.view(x0.shape).to(x0)
+            if isinstance(out, tuple):
+                return (mixed_out,) + out[1:]
+            if isinstance(out, list):
+                out_list = list(out)
+                out_list[0] = mixed_out
+                return out_list
+            return mixed_out
         return _hook
 
     for i in range(len(layers)):
@@ -740,13 +742,9 @@ def cali_x_mask_comp(args, model, dataloader, dev, logger):
         with torch.no_grad():
             layer.float()
  
-        layer.self_attn._ori_mode = True
-        layer.mlp._ori_mode = True
         with torch.no_grad():
             for j in range(args.nsamples):
                 ref_outs[j] = layer(fp_inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
-        layer.self_attn._ori_mode = False
-        layer.mlp._ori_mode = False
         layer = layer.to(dev)
         stats_by_trans = {}
         for name, trans in (
@@ -754,20 +752,15 @@ def cali_x_mask_comp(args, model, dataloader, dev, logger):
             ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
             ("mlp.down_trans", layer.mlp.down_trans),
         ):
-            if trans is None or not getattr(trans, "use_x_mask", False):
-                continue
-            if trans.x_mask_r_thr is None:
-                continue
-            if trans.x_mask_mode not in ("switch_top2_soft", "switch_top2_hard"):
-                continue
             weights = _collect_trans_weights(layer, name)
-            if len(weights) == 0:
-                continue
             H = _compute_group_hessian(weights, trans.hidden_dim)
-            if H is None:
-                continue
-            r = _compute_r_for_trans(trans, trans.x_mask_mode)
-            sel = (r < trans.x_mask_r_thr).float()
+            if trans.x_mask_r_thr is not None:
+                r = _compute_r_for_trans(trans, trans.x_mask_mode)
+                sel = (r < trans.x_mask_r_thr).float()
+            else:
+                r = None
+                sel = None
+                trans.x_mode_mode = "hard_top2"
             stats_by_trans[name] = {
                 "num_groups": trans.hidden_dim // 4,
                 "H": H,
@@ -776,8 +769,8 @@ def cali_x_mask_comp(args, model, dataloader, dev, logger):
                 "mode": trans.x_mask_mode,
                 "tau": float(getattr(trans, "x_mask_tau", 1.0)),
                 "hard_mode": getattr(trans, "x_mask_r_mode", "top2"),
-                "num": torch.zeros_like(r, device=H.device, dtype=H.dtype),
-                "den": torch.zeros_like(r, device=H.device, dtype=H.dtype),
+                "num": torch.zeros_like(trans.hidden_dim // 4, device=H.device, dtype=H.dtype),
+                "den": torch.zeros_like(trans.hidden_dim // 4, device=H.device, dtype=H.dtype),
             }
 
         hooks = []
@@ -788,8 +781,6 @@ def cali_x_mask_comp(args, model, dataloader, dev, logger):
         ):
             trans.use_x_mask = False
             stats = stats_by_trans.get(name, None)
-            if stats is None:
-                continue
             hooks.append(trans.register_forward_hook(_make_comp_hook(stats)))
 
         mse_pre = 0
@@ -827,6 +818,7 @@ def cali_x_mask_comp(args, model, dataloader, dev, logger):
             if hasattr(trans, "x_mask_comp") and trans.x_mask_comp is not None:
                 trans.x_mask_comp.data.copy_(comp.to(trans.x_mask_comp.device, dtype=trans.x_mask_comp.dtype))
                 trans.use_x_mask_comp = True
+                trans.use_x_mask = True
 
         mse_post = 0
         with torch.no_grad():
