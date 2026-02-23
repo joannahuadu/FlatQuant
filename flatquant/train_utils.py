@@ -171,8 +171,8 @@ def _compute_fixed_patterns(H, sum_x, sum_xx, count, lam_eps, lam_min=1e-6):
         count = int(count.item())
     else:
         count = int(count)
-    if count <= 0:
-        return None, None
+    if count <= 0 or H is None:
+        return None, None, None, None
     device = H.device
     patterns = torch.tensor([[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]], device=device, dtype=torch.long)
     drop_patterns = torch.tensor([[2, 3], [1, 3], [1, 2], [0, 3], [0, 2], [0, 1]], device=device, dtype=torch.long)
@@ -191,6 +191,7 @@ def _compute_fixed_patterns(H, sum_x, sum_xx, count, lam_eps, lam_min=1e-6):
     lam = lam.clamp_min(lam_min)
     I2 = torch.eye(2, device=device, dtype=torch.float32).unsqueeze(0)
     A_all = torch.empty((num_groups, 6, 2, 2), device=device, dtype=torch.float32)
+    R_all = torch.empty((num_groups, 6, 2, 2), device=device, dtype=torch.float32)
     cost = torch.empty((num_groups, 6), device=device, dtype=torch.float32)
     for pid in range(6):
         keep = patterns[pid]
@@ -202,6 +203,7 @@ def _compute_fixed_patterns(H, sum_x, sum_xx, count, lam_eps, lam_min=1e-6):
         A = torch.linalg.solve(Hkk + lam[:, None, None] * I2, Hkp)
         R = Hpp - Hpk @ A
         A_all[:, pid] = A
+        R_all[:, pid] = R
         mu_p = mu[:, drop]
         sigma_pp = sigma[:, drop][:, :, drop]
         tr_term = torch.einsum("gij,gij->g", R, sigma_pp)
@@ -210,7 +212,7 @@ def _compute_fixed_patterns(H, sum_x, sum_xx, count, lam_eps, lam_min=1e-6):
     best = torch.argmin(cost, dim=1)
     idx = torch.arange(num_groups, device=device)
     A_fix = A_all[idx, best]
-    return best, A_fix
+    return best, A_fix, A_all, R_all
 
 
 def _compute_r_for_trans(trans, mode):
@@ -582,7 +584,9 @@ def cali_x_mask_fixed(args, model, dataloader, dev, logger):
             ("mlp.down_trans", layer.mlp.down_trans),
         ):
             stats = stats_by_trans.get(name, None)
-            best, A_fix = _compute_fixed_patterns(
+            if stats is None:
+                continue
+            best, A_fix, A_all, R_all = _compute_fixed_patterns(
                 stats["H"],
                 stats["sum"],
                 stats["sum_sq"],
@@ -596,6 +600,14 @@ def cali_x_mask_fixed(args, model, dataloader, dev, logger):
             if hasattr(trans, "x_mask_fixed_A") and trans.x_mask_fixed_A is not None:
                 trans.x_mask_fixed_A.data.copy_(
                     A_fix.to(trans.x_mask_fixed_A.device, dtype=trans.x_mask_fixed_A.dtype)
+                )
+            if hasattr(trans, "x_mask_fixed_A_all") and trans.x_mask_fixed_A_all is not None:
+                trans.x_mask_fixed_A_all.data.copy_(
+                    A_all.to(trans.x_mask_fixed_A_all.device, dtype=trans.x_mask_fixed_A_all.dtype)
+                )
+            if hasattr(trans, "x_mask_fixed_R_all") and trans.x_mask_fixed_R_all is not None:
+                trans.x_mask_fixed_R_all.data.copy_(
+                    R_all.to(trans.x_mask_fixed_R_all.device, dtype=trans.x_mask_fixed_R_all.dtype)
                 )
             trans.use_x_mask_fixed = True
 

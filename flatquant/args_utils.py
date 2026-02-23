@@ -147,12 +147,13 @@ def parser_gen():
     parser.add_argument("--x_mask_mode", type=str, default="hard_fixed",
                         choices=["hard_fixed", "hard_top2", "soft_top2",
                                  "switch_top2_soft", "switch_top2_hard",
-                                 "switch_top2_hard_ste", "fixed_top2"],
+                                 "switch_top2_hard_ste", "fixed_top2", "online_top2"],
                         help="Masking mode after x_perm: hard_fixed zeros channels 2:4; "
                              "hard_top2 keeps top-2 magnitudes per group; soft_top2 uses 2*softmax gate; "
                              "switch_top2 chooses between dense and top2 per group; "
                              "switch_top2_hard_ste uses hard r with straight-through gradients; "
-                             "fixed_top2 uses precomputed fixed patterns per group.")
+                             "fixed_top2 uses precomputed fixed patterns per group; "
+                             "online_top2 selects best pattern per token using precomputed A/R.")
     parser.add_argument("--x_mask_tau", type=float, default=1.0,
                         help="Temperature for soft_top2 x_mask_mode (lower -> sharper).")
     parser.add_argument("--x_mask_r_thr", type=float, default=None,

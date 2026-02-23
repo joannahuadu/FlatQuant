@@ -176,6 +176,8 @@ def save_flat_matrices(args, model, rank=None):
             "trans.x_mask_comp",
             "trans.x_mask_fixed_pattern",
             "trans.x_mask_fixed_A",
+            "trans.x_mask_fixed_A_all",
+            "trans.x_mask_fixed_R_all",
             "clip_factor_w",
             "clip_factor_a",
         ]
