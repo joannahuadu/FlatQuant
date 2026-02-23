@@ -944,6 +944,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     track_x_mask_err = False
     for i in range(num_train_layer):
         logger.info(f"========= Layer {i} =========")
+        layer_lr_scale = 1.0 + (i / max(1, num_train_layer - 1))
+        layer_lr = args.flat_lr * layer_lr_scale
+        logger.info(f"layer init lr={layer_lr:.6g} (scale={layer_lr_scale:.3f})")
         target_layer = None
         target_left_svals = {}
         if target_right_by_layer is not None:
@@ -1015,13 +1018,13 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 perm_logits[name] = trans.x_perm_logits
             perm_logits_by_layer[i] = perm_logits
             if len(predictor_params) > 0:
-                trained_params.append({"params": predictor_params, "lr": args.flat_lr})
+                trained_params.append({"params": predictor_params, "lr": layer_lr})
                 paras_name.append("trans.x_perm_predictor")
             if args.use_x_perm:
-                trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.x_perm_logits", ]), "lr": args.flat_lr})
+                trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.x_perm_logits", ]), "lr": layer_lr})
                 paras_name.append("trans.x_perm_logits")
         elif args.soft_perm and target_layer is not None:
-            trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.perm_logits", ]), "lr": args.flat_lr})
+            trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.perm_logits", ]), "lr": layer_lr})
             paras_name.append("trans.perm_logits")
             for name, trans in (
                 ("self_attn.ln_trans", layer.self_attn.ln_trans),
@@ -1033,25 +1036,25 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 perm_logits[name] = trans.perm_logits
             perm_logits_by_layer[i] = perm_logits
         if args.cali_trans:
-            trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.linear", ]), "lr": args.flat_lr})
+            trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.linear", ]), "lr": layer_lr})
             paras_name.append("trans.linear")
         if args.add_diag and args.cali_trans:
-            trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.diag_scale", ]), "lr": args.flat_lr})
+            trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.diag_scale", ]), "lr": layer_lr})
             paras_name.append("trans.diag_scale")
         if args.lwc:
-            trained_params.append({"params": get_n_set_parameters_byname(layer, ["clip_factor_w", ]), "lr": args.flat_lr * 10})
+            trained_params.append({"params": get_n_set_parameters_byname(layer, ["clip_factor_w", ]), "lr": layer_lr * 10})
             paras_name.append("clip_factor_w")
         if args.lac:
-            trained_params.append({"params": get_n_set_parameters_byname(layer, ["clip_factor_a", ]), "lr": args.flat_lr * 10})
+            trained_params.append({"params": get_n_set_parameters_byname(layer, ["clip_factor_a", ]), "lr": layer_lr * 10})
             paras_name.append("clip_factor_a")
         if args.use_x_mask and "switch_top2" in args.x_mask_mode:
-            trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.x_mask_gate", ]), "lr": args.flat_lr})
+            trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.x_mask_gate", ]), "lr": layer_lr * 10})
             paras_name.append("trans.x_mask_gate")
 
         steps_per_epoch = max(1, args.nsamples // args.cali_bsz)
         total_steps = max(1, args.epochs * steps_per_epoch)
         tmax = max(1, int(args.epochs * steps_per_epoch * args.flat_lr_tmax_mult))
-        eta_min = args.flat_lr * args.flat_lr_min_ratio
+        eta_min = layer_lr * args.flat_lr_min_ratio
         def _build_scheduler(optim):
             scheduler_main = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optim, T_max=tmax, eta_min=eta_min
