@@ -43,6 +43,7 @@ def reparameterize_model(
     use_comp_mask=False,
     use_x_mask=False,
     use_x_mask_comp=False,
+    use_x_mask_fixed=False,
     x_mask_mode="hard_fixed",
     x_mask_tau=1.0,
     x_mask_r_thr=None,
@@ -62,6 +63,7 @@ def reparameterize_model(
             layer.self_attn.ln_trans.use_comp_mask = use_comp_mask
             layer.self_attn.ln_trans.use_x_mask = use_x_mask
             layer.self_attn.ln_trans.use_x_mask_comp = use_x_mask_comp
+            layer.self_attn.ln_trans.use_x_mask_fixed = use_x_mask_fixed
             layer.self_attn.ln_trans.x_mask_mode = x_mask_mode
             layer.self_attn.ln_trans.x_mask_tau = x_mask_tau
             layer.self_attn.ln_trans.x_mask_r_thr = x_mask_r_thr
@@ -85,6 +87,7 @@ def reparameterize_model(
             layer.mlp.up_gate_trans.use_comp_mask = use_comp_mask
             layer.mlp.up_gate_trans.use_x_mask = use_x_mask
             layer.mlp.up_gate_trans.use_x_mask_comp = use_x_mask_comp
+            layer.mlp.up_gate_trans.use_x_mask_fixed = use_x_mask_fixed
             layer.mlp.up_gate_trans.x_mask_mode = x_mask_mode
             layer.mlp.up_gate_trans.x_mask_tau = x_mask_tau
             layer.mlp.up_gate_trans.x_mask_r_thr = x_mask_r_thr
@@ -108,6 +111,7 @@ def reparameterize_model(
             layer.mlp.down_trans.use_comp_mask = use_comp_mask
             layer.mlp.down_trans.use_x_mask = use_x_mask
             layer.mlp.down_trans.use_x_mask_comp = use_x_mask_comp
+            layer.mlp.down_trans.use_x_mask_fixed = use_x_mask_fixed
             layer.mlp.down_trans.x_mask_mode = x_mask_mode
             layer.mlp.down_trans.x_mask_tau = x_mask_tau
             layer.mlp.down_trans.x_mask_r_thr = x_mask_r_thr
@@ -170,6 +174,8 @@ def save_flat_matrices(args, model, rank=None):
             "trans.x_perm_logits",
             "trans.x_mask_gate",
             "trans.x_mask_comp",
+            "trans.x_mask_fixed_pattern",
+            "trans.x_mask_fixed_A",
             "clip_factor_w",
             "clip_factor_a",
         ]

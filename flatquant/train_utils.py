@@ -166,6 +166,42 @@ def _compute_group_hessian(weights, hidden_dim):
     return H
 
 
+def _compute_fixed_patterns(H, sum_x, sum_xx, count, lam_eps):
+    if count <= 0:
+        return None, None
+    num_groups = H.shape[0]
+    patterns = torch.tensor([[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]], device=H.device)
+    drop_patterns = torch.tensor([[2, 3], [1, 3], [1, 2], [0, 3], [0, 2], [0, 1]], device=H.device)
+    mu = sum_x / float(count)
+    m2 = sum_xx / float(count)
+    sigma = m2 - mu.unsqueeze(-1) * mu.unsqueeze(-2)
+    trace = H.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
+    lam = lam_eps * (trace / 4.0 + 1e-12)
+    eye = torch.eye(2, device=H.device, dtype=H.dtype).unsqueeze(0)
+    A_all = torch.zeros((num_groups, 6, 2, 2), device=H.device, dtype=H.dtype)
+    cost = torch.zeros((num_groups, 6), device=H.device, dtype=H.dtype)
+    for pid in range(6):
+        keep = patterns[pid]
+        drop = drop_patterns[pid]
+        Hkk = H[:, keep][:, :, keep]
+        Hkp = H[:, keep][:, :, drop]
+        Hpk = H[:, drop][:, :, keep]
+        Hpp = H[:, drop][:, :, drop]
+        inv = torch.linalg.inv(Hkk + lam.unsqueeze(-1).unsqueeze(-1) * eye)
+        A = torch.matmul(inv, Hkp)
+        R = Hpp - torch.matmul(Hpk, torch.matmul(inv, Hkp))
+        A_all[:, pid] = A
+        mu_p = mu[:, drop]
+        sigma_pp = sigma[:, drop][:, :, drop]
+        tr_term = (R * sigma_pp).sum(dim=(-1, -2))
+        quad = torch.einsum("gi,gij,gj->g", mu_p, R, mu_p)
+        cost[:, pid] = tr_term + quad
+    best = torch.argmin(cost, dim=1)
+    idx = torch.arange(num_groups, device=H.device)
+    A_fix = A_all[idx, best]
+    return best, A_fix
+
+
 def _compute_r_for_trans(trans, mode):
     logits = trans.x_mask_gate_logits
     return torch.sigmoid(logits)
@@ -391,6 +427,180 @@ def cali_sparse(args, model, dataloader, dev, logger):
             del layer
             torch.cuda.empty_cache()
             continue
+
+    del inps, fp_inps, fp_outs
+    gc.collect()
+    torch.cuda.empty_cache()
+    model.config.use_cache = use_cache
+    return model
+
+
+def cali_x_mask_fixed(args, model, dataloader, dev, logger):
+    if not getattr(args, "use_x_mask_fixed", False):
+        return model
+    if not args.use_x_mask:
+        return model
+
+    model.eval()
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+
+    for name, param in model.named_parameters():
+        param.requires_grad = False
+
+    if args.deactive_amp:
+        dtype = torch.float32
+    else:
+        dtype = torch.float16 if isinstance(model, transformers.LlamaForCausalLM) else torch.bfloat16
+
+    layers = model.model.layers
+    layers[0] = layers[0].to(dev)
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.to(dev)
+
+    inps = torch.zeros(
+        (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
+    )
+    cache = {"i": 0}
+
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, inp, **kwargs):
+            inps[cache["i"]] = inp
+            cache["i"] += 1
+            cache["attention_mask"] = kwargs["attention_mask"]
+            cache["position_ids"] = kwargs["position_ids"]
+            raise ValueError
+
+    layers[0] = Catcher(layers[0])
+    with torch.no_grad():
+        for batch in dataloader:
+            if cache["i"] >= args.nsamples:
+                break
+            try:
+                sample = batch[0]
+                model(sample.to(dev))
+            except ValueError:
+                pass
+
+    position_ids = cache["position_ids"]
+    attention_mask = cache["attention_mask"]
+    if attention_mask is not None:
+        attention_mask_batch = attention_mask.repeat(args.cali_bsz, 1, 1, 1).float()
+    else:
+        attention_mask_batch = None
+
+    layers[0] = layers[0].module
+    layers[0] = layers[0].cpu()
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.cpu()
+    torch.cuda.empty_cache()
+
+    fp_inps = inps
+    fp_outs = torch.zeros_like(inps)
+
+    def _make_stats_hook(stats):
+        def _hook(_module, _inp, out):
+            if out is None:
+                return
+            x = out[0] if isinstance(out, (tuple, list)) else out
+            x = x.float().view(-1, stats["num_groups"], 4)
+            stats["count"] += x.shape[0]
+            stats["sum"] += x.sum(dim=0)
+            stats["sum_sq"] += torch.einsum("ngp,ngq->gpq", x, x)
+        return _hook
+
+    for i in range(len(layers)):
+        logger.info(f"x_mask_fixed: layer {i}")
+        layer = layers[i].to(dev)
+        dtype_dict = {name: param.dtype for name, param in layer.named_parameters()}
+        with torch.no_grad():
+            layer.float()
+
+        orig_mask_flags = []
+        for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
+            orig_mask_flags.append((trans, trans.use_x_mask, trans.use_x_mask_fixed))
+            trans.use_x_mask = False
+            trans.use_x_mask_fixed = False
+
+        stats_by_trans = {}
+        for name, trans in (
+            ("self_attn.ln_trans", layer.self_attn.ln_trans),
+            ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+            ("mlp.down_trans", layer.mlp.down_trans),
+        ):
+            weights = _collect_trans_weights(layer, name)
+            H = _compute_group_hessian(weights, trans.hidden_dim)
+            num_groups = trans.hidden_dim // 4
+            stats_by_trans[name] = {
+                "num_groups": num_groups,
+                "H": H,
+                "count": 0,
+                "sum": torch.zeros((num_groups, 4), device=H.device, dtype=H.dtype),
+                "sum_sq": torch.zeros((num_groups, 4, 4), device=H.device, dtype=H.dtype),
+            }
+
+        hooks = []
+        for name, trans in (
+            ("self_attn.ln_trans", layer.self_attn.ln_trans),
+            ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+            ("mlp.down_trans", layer.mlp.down_trans),
+        ):
+            stats = stats_by_trans.get(name, None)
+            hooks.append(trans.register_forward_hook(_make_stats_hook(stats)))
+
+        with torch.no_grad():
+            for j in range(args.nsamples // args.cali_bsz):
+                index = j * args.cali_bsz
+                out = layer(
+                    fp_inps[index:index + args.cali_bsz],
+                    attention_mask=attention_mask_batch,
+                    position_ids=position_ids,
+                )[0]
+                fp_outs[index:index + args.cali_bsz] = out
+
+        for h in hooks:
+            h.remove()
+
+        for name, trans in (
+            ("self_attn.ln_trans", layer.self_attn.ln_trans),
+            ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+            ("mlp.down_trans", layer.mlp.down_trans),
+        ):
+            stats = stats_by_trans.get(name, None)
+            best, A_fix = _compute_fixed_patterns(
+                stats["H"],
+                stats["sum"],
+                stats["sum_sq"],
+                stats["count"],
+                getattr(args, "x_mask_fixed_lam_eps", 1e-3),
+            )
+            if hasattr(trans, "x_mask_fixed_pattern") and trans.x_mask_fixed_pattern is not None:
+                trans.x_mask_fixed_pattern.data.copy_(
+                    best.to(trans.x_mask_fixed_pattern.device, dtype=trans.x_mask_fixed_pattern.dtype)
+                )
+            if hasattr(trans, "x_mask_fixed_A") and trans.x_mask_fixed_A is not None:
+                trans.x_mask_fixed_A.data.copy_(
+                    A_fix.to(trans.x_mask_fixed_A.device, dtype=trans.x_mask_fixed_A.dtype)
+                )
+            trans.use_x_mask_fixed = True
+
+        for trans, use_mask, use_fixed in orig_mask_flags:
+            trans.use_x_mask = use_mask
+            trans.use_x_mask_fixed = use_fixed if not args.use_x_mask_fixed else True
+
+        for name, param in layer.named_parameters():
+            if name in dtype_dict:
+                param.data = param.to(dtype_dict[name])
+        fp_inps, fp_outs = fp_outs, fp_inps
+        layers[i] = layer.to("cpu")
+        del layer
+        torch.cuda.empty_cache()
 
     del inps, fp_inps, fp_outs
     gc.collect()

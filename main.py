@@ -98,10 +98,12 @@ def main():
 
     if args.x_mask_track_err or args.x_mask_use_err:
         train_utils.cali_sparse(args, model, trainloader, utils.DEV, logger)
+    if args.use_x_mask_fixed:
+        train_utils.cali_x_mask_fixed(args, model, trainloader, utils.DEV, logger)
     if args.use_x_mask_comp:
         train_utils.cali_x_mask_comp(args, model, trainloader, utils.DEV, logger)
-        if args.save_matrix:
-            flat_utils.save_flat_matrices(args, model)
+    if args.save_matrix and (args.use_x_mask_fixed or args.use_x_mask_comp):
+        flat_utils.save_flat_matrices(args, model)
     
     ## save quantized weight
     if args.quantized_save:

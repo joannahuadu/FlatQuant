@@ -147,11 +147,12 @@ def parser_gen():
     parser.add_argument("--x_mask_mode", type=str, default="hard_fixed",
                         choices=["hard_fixed", "hard_top2", "soft_top2",
                                  "switch_top2_soft", "switch_top2_hard",
-                                 "switch_top2_hard_ste"],
+                                 "switch_top2_hard_ste", "fixed_top2"],
                         help="Masking mode after x_perm: hard_fixed zeros channels 2:4; "
                              "hard_top2 keeps top-2 magnitudes per group; soft_top2 uses 2*softmax gate; "
                              "switch_top2 chooses between dense and top2 per group; "
-                             "switch_top2_hard_ste uses hard r with straight-through gradients.")
+                             "switch_top2_hard_ste uses hard r with straight-through gradients; "
+                             "fixed_top2 uses precomputed fixed patterns per group.")
     parser.add_argument("--x_mask_tau", type=float, default=1.0,
                         help="Temperature for soft_top2 x_mask_mode (lower -> sharper).")
     parser.add_argument("--x_mask_r_thr", type=float, default=None,
@@ -164,6 +165,10 @@ def parser_gen():
     parser.add_argument("--use_x_mask_comp", action="store_true", default=False,
                         help="Apply per-group compensation scalar for r < thr sparse path "
                              "(requires trans.x_mask_comp to be set).")
+    parser.add_argument("--use_x_mask_fixed", action="store_true", default=False,
+                        help="Use fixed 2:4 patterns with 2x2 compensation (requires calibration).")
+    parser.add_argument("--x_mask_fixed_lam_eps", type=float, default=1e-3,
+                        help="Damping scale for fixed 2:4 compensation (lambda = eps * trace(H)/4).")
     parser.add_argument("--x_mask_gate_cost", type=float, default=0.0,
                         help="Weight for switch_top2 gate mean target loss (or L1 if target not set).")
     parser.add_argument("--x_mask_gate_target", type=float, default=None,

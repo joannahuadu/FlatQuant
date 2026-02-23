@@ -4,6 +4,14 @@ import torch.nn as nn
 from flatquant.flat_utils import kronecker_matmul, _kronecker_matmul_masked
 from flatquant.function_utils import get_init_weight, get_inverse
 
+# Fixed 2:4 patterns (keep indices) and their complements (drop indices).
+_X_MASK_TOP2_PATTERNS = torch.tensor(
+    [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]], dtype=torch.long
+)
+_X_MASK_TOP2_DROP = torch.tensor(
+    [[2, 3], [1, 3], [1, 2], [0, 3], [0, 2], [0, 1]], dtype=torch.long
+)
+
 # ---------- soft permutation (sinkhorn) ----------
 def _sinkhorn(logits, n_iters=10):
     log_p = logits
@@ -200,6 +208,13 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.x_mask_gate_logits = nn.Parameter(torch.zeros((left_size * right_size) // 4, dtype=torch.float32), requires_grad=True)
         self.use_x_mask_comp = False
         self.x_mask_comp = nn.Parameter(torch.ones((left_size * right_size) // 4, dtype=torch.float32), requires_grad=False)
+        self.use_x_mask_fixed = False
+        self.x_mask_fixed_pattern = nn.Parameter(
+            torch.zeros((left_size * right_size) // 4, dtype=torch.float32), requires_grad=False
+        )
+        self.x_mask_fixed_A = nn.Parameter(
+            torch.zeros((left_size * right_size) // 4, 2, 2, dtype=torch.float32), requires_grad=False
+        )
         self._last_x_mask_ent = None
         self._last_x_mask_l2 = None
         self._last_x_mask_gate_mean = None
@@ -349,6 +364,29 @@ class SVDDecomposeTransMatrix(nn.Module):
             kmeans_iters=self.x_perm_kmeans_iters,
         )
 
+    def _apply_x_mask_fixed(self, reshaped):
+        if not getattr(self, "use_x_mask_fixed", False):
+            return None
+        if self.x_mask_fixed_pattern is None or self.x_mask_fixed_A is None:
+            return None
+        if self.x_mask_fixed_pattern.numel() == 0:
+            return None
+        x = reshaped.view(-1, reshaped.shape[-2], 4)
+        pid = self.x_mask_fixed_pattern.to(device=x.device, dtype=torch.long)
+        patterns = _X_MASK_TOP2_PATTERNS.to(x.device)
+        drops = _X_MASK_TOP2_DROP.to(x.device)
+        keep_idx = patterns.index_select(0, pid)
+        drop_idx = drops.index_select(0, pid)
+        keep_exp = keep_idx.unsqueeze(0).expand(x.shape[0], -1, -1)
+        drop_exp = drop_idx.unsqueeze(0).expand(x.shape[0], -1, -1)
+        x_keep = torch.gather(x, -1, keep_exp)
+        x_drop = torch.gather(x, -1, drop_exp)
+        A = self.x_mask_fixed_A.to(x)
+        x_keep = x_keep + torch.einsum("gij,bgj->bgi", A, x_drop)
+        out = x.new_zeros(x.shape)
+        out.scatter_(-1, keep_exp, x_keep)
+        return out.view_as(reshaped)
+
     def _apply_x_mask(self, tensor):
         self._last_x_mask_ent = None
         self._last_x_mask_l2 = None
@@ -363,6 +401,13 @@ class SVDDecomposeTransMatrix(nn.Module):
             out = reshaped.clone()
             out[..., 2:4] = out[..., 2:4] * (1.0 - alpha)
             return out.view_as(tensor)
+        if mode == "fixed_top2":
+            fixed = self._apply_x_mask_fixed(reshaped)
+            if fixed is None:
+                return reshaped.view_as(tensor)
+            if alpha < 1.0:
+                fixed = (1.0 - alpha) * reshaped + alpha * fixed
+            return fixed.view_as(tensor)
 
         scores = reshaped.abs()
         if mode == "switch_top2_soft":
