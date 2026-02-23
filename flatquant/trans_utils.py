@@ -215,6 +215,12 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.x_mask_fixed_A = nn.Parameter(
             torch.zeros((left_size * right_size) // 4, 2, 2, dtype=torch.float32), requires_grad=False
         )
+        self.x_mask_fixed_A_all = nn.Parameter(
+            torch.zeros((left_size * right_size) // 4, 6, 2, 2, dtype=torch.float32), requires_grad=False
+        )
+        self.x_mask_fixed_R_all = nn.Parameter(
+            torch.zeros((left_size * right_size) // 4, 6, 2, 2, dtype=torch.float32), requires_grad=False
+        )
         self._last_x_mask_ent = None
         self._last_x_mask_l2 = None
         self._last_x_mask_gate_mean = None
@@ -387,6 +393,44 @@ class SVDDecomposeTransMatrix(nn.Module):
         out.scatter_(-1, keep_exp, x_keep)
         return out.view_as(reshaped)
 
+    def _apply_x_mask_online(self, reshaped):
+        if not getattr(self, "use_x_mask_fixed", False):
+            return None
+        if self.x_mask_fixed_A_all is None or self.x_mask_fixed_R_all is None:
+            return None
+        if self.x_mask_fixed_A_all.numel() == 0:
+            return None
+        x = reshaped.view(-1, reshaped.shape[-2], 4)
+        A_all = self.x_mask_fixed_A_all.to(x)
+        R_all = self.x_mask_fixed_R_all.to(x)
+        patterns = _X_MASK_TOP2_PATTERNS.to(x.device)
+        drops = _X_MASK_TOP2_DROP.to(x.device)
+
+        costs = []
+        for pid in range(6):
+            drop = drops[pid]
+            drop_exp = drop.unsqueeze(0).unsqueeze(0).expand(x.shape[0], x.shape[1], -1)
+            x_drop = torch.gather(x, -1, drop_exp)
+            Rm = R_all[:, pid]
+            cost = torch.einsum("bgi,gij,bgj->bg", x_drop, Rm, x_drop)
+            costs.append(cost)
+        cost = torch.stack(costs, dim=-1)
+        best = torch.argmin(cost, dim=-1)
+
+        keep_idx = patterns[best]
+        drop_idx = drops[best]
+        x_keep = torch.gather(x, -1, keep_idx)
+        x_drop = torch.gather(x, -1, drop_idx)
+
+        A_exp = A_all.unsqueeze(0).expand(x.shape[0], -1, -1, -1, -1)
+        idx = best.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2, 2)
+        A_sel = torch.gather(A_exp, 2, idx).squeeze(2)
+        x_keep = x_keep + torch.einsum("bgij,bgj->bgi", A_sel, x_drop)
+
+        out = x.new_zeros(x.shape)
+        out.scatter_(-1, keep_idx, x_keep)
+        return out.view_as(reshaped)
+
     def _apply_x_mask(self, tensor):
         self._last_x_mask_ent = None
         self._last_x_mask_l2 = None
@@ -408,6 +452,20 @@ class SVDDecomposeTransMatrix(nn.Module):
             if alpha < 1.0:
                 fixed = (1.0 - alpha) * reshaped + alpha * fixed
             return fixed.view_as(tensor)
+        if mode == "online_top2":
+            online = self._apply_x_mask_online(reshaped)
+            if online is None:
+                return reshaped.view_as(tensor)
+            if alpha < 1.0:
+                online = (1.0 - alpha) * reshaped + alpha * online
+            return online.view_as(tensor)
+        if mode == "online_top2":
+            online = self._apply_x_mask_online(reshaped)
+            if online is None:
+                return reshaped.view_as(tensor)
+            if alpha < 1.0:
+                online = (1.0 - alpha) * reshaped + alpha * online
+            return online.view_as(tensor)
 
         scores = reshaped.abs()
         if mode == "switch_top2_soft":

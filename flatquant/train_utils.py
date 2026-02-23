@@ -167,8 +167,8 @@ def _compute_group_hessian(weights, hidden_dim):
 
 
 def _compute_fixed_patterns(H, sum_x, sum_xx, count, lam_eps):
-    if count <= 0:
-        return None, None
+    if count <= 0 or H is None:
+        return None, None, None, None
     num_groups = H.shape[0]
     patterns = torch.tensor([[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]], device=H.device)
     drop_patterns = torch.tensor([[2, 3], [1, 3], [1, 2], [0, 3], [0, 2], [0, 1]], device=H.device)
@@ -179,6 +179,7 @@ def _compute_fixed_patterns(H, sum_x, sum_xx, count, lam_eps):
     lam = lam_eps * (trace / 4.0 + 1e-12)
     eye = torch.eye(2, device=H.device, dtype=H.dtype).unsqueeze(0)
     A_all = torch.zeros((num_groups, 6, 2, 2), device=H.device, dtype=H.dtype)
+    R_all = torch.zeros((num_groups, 6, 2, 2), device=H.device, dtype=H.dtype)
     cost = torch.zeros((num_groups, 6), device=H.device, dtype=H.dtype)
     for pid in range(6):
         keep = patterns[pid]
@@ -191,6 +192,7 @@ def _compute_fixed_patterns(H, sum_x, sum_xx, count, lam_eps):
         A = torch.matmul(inv, Hkp)
         R = Hpp - torch.matmul(Hpk, torch.matmul(inv, Hkp))
         A_all[:, pid] = A
+        R_all[:, pid] = R
         mu_p = mu[:, drop]
         sigma_pp = sigma[:, drop][:, :, drop]
         tr_term = (R * sigma_pp).sum(dim=(-1, -2))
@@ -199,7 +201,7 @@ def _compute_fixed_patterns(H, sum_x, sum_xx, count, lam_eps):
     best = torch.argmin(cost, dim=1)
     idx = torch.arange(num_groups, device=H.device)
     A_fix = A_all[idx, best]
-    return best, A_fix
+    return best, A_fix, A_all, R_all
 
 
 def _compute_r_for_trans(trans, mode):
@@ -573,7 +575,9 @@ def cali_x_mask_fixed(args, model, dataloader, dev, logger):
             ("mlp.down_trans", layer.mlp.down_trans),
         ):
             stats = stats_by_trans.get(name, None)
-            best, A_fix = _compute_fixed_patterns(
+            if stats is None:
+                continue
+            best, A_fix, A_all, R_all = _compute_fixed_patterns(
                 stats["H"],
                 stats["sum"],
                 stats["sum_sq"],
@@ -587,6 +591,14 @@ def cali_x_mask_fixed(args, model, dataloader, dev, logger):
             if hasattr(trans, "x_mask_fixed_A") and trans.x_mask_fixed_A is not None:
                 trans.x_mask_fixed_A.data.copy_(
                     A_fix.to(trans.x_mask_fixed_A.device, dtype=trans.x_mask_fixed_A.dtype)
+                )
+            if hasattr(trans, "x_mask_fixed_A_all") and trans.x_mask_fixed_A_all is not None:
+                trans.x_mask_fixed_A_all.data.copy_(
+                    A_all.to(trans.x_mask_fixed_A_all.device, dtype=trans.x_mask_fixed_A_all.dtype)
+                )
+            if hasattr(trans, "x_mask_fixed_R_all") and trans.x_mask_fixed_R_all is not None:
+                trans.x_mask_fixed_R_all.data.copy_(
+                    R_all.to(trans.x_mask_fixed_R_all.device, dtype=trans.x_mask_fixed_R_all.dtype)
                 )
             trans.use_x_mask_fixed = True
 
