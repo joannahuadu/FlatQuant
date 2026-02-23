@@ -614,7 +614,7 @@ def cali_x_mask_fixed(args, model, dataloader, dev, logger):
         for trans, use_mask, use_fixed in orig_mask_flags:
             trans.use_x_mask = True
             trans.use_x_mask_fixed = use_fixed if not args.use_x_mask_fixed else True
-            trans.x_mask_mode = "fixed_top2"
+            trans.x_mask_mode = args.x_mask_mode
             
         for name, param in layer.named_parameters():
             if name in dtype_dict:
