@@ -459,13 +459,6 @@ class SVDDecomposeTransMatrix(nn.Module):
             if alpha < 1.0:
                 online = (1.0 - alpha) * reshaped + alpha * online
             return online.view_as(tensor)
-        if mode == "online_top2":
-            online = self._apply_x_mask_online(reshaped)
-            if online is None:
-                return reshaped.view_as(tensor)
-            if alpha < 1.0:
-                online = (1.0 - alpha) * reshaped + alpha * online
-            return online.view_as(tensor)
 
         scores = reshaped.abs()
         if mode == "switch_top2_soft":
@@ -601,7 +594,7 @@ class SVDDecomposeTransMatrix(nn.Module):
             self._last_x_mask_l2 = (mask.pow(2).sum(dim=-1) - 2.0).pow(2).mean()
             gate = (1.0 - alpha) + alpha * mask
             if getattr(self, "use_x_mask_comp", False) and self.x_mask_comp is not None:
-                comp = self.x_mask_comp.to(mixed).unsqueeze(-1)
+                comp = self.x_mask_comp.to(reshaped).unsqueeze(-1)
                 gate = gate * comp
             return (reshaped * gate).view_as(tensor)
         if mode == "soft_top2":

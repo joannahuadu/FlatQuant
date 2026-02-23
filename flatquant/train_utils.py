@@ -166,40 +166,51 @@ def _compute_group_hessian(weights, hidden_dim):
     return H
 
 
-def _compute_fixed_patterns(H, sum_x, sum_xx, count, lam_eps):
+def _compute_fixed_patterns(H, sum_x, sum_xx, count, lam_eps, lam_min=1e-6):
+    if isinstance(count, torch.Tensor):
+        count = int(count.item())
+    else:
+        count = int(count)
     if count <= 0 or H is None:
         return None, None, None, None
-    num_groups = H.shape[0]
-    patterns = torch.tensor([[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]], device=H.device)
-    drop_patterns = torch.tensor([[2, 3], [1, 3], [1, 2], [0, 3], [0, 2], [0, 1]], device=H.device)
-    mu = sum_x / float(count)
-    m2 = sum_xx / float(count)
+    device = H.device
+    patterns = torch.tensor([[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]], device=device, dtype=torch.long)
+    drop_patterns = torch.tensor([[2, 3], [1, 3], [1, 2], [0, 3], [0, 2], [0, 1]], device=device, dtype=torch.long)
+    Hf = H.float()
+    sum_xf = sum_x.float()
+    sum_xxf = sum_xx.float()
+    num_groups = Hf.shape[0]
+    mu = sum_xf / float(count)
+    m2 = sum_xxf / float(count)
     sigma = m2 - mu.unsqueeze(-1) * mu.unsqueeze(-2)
-    trace = H.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
+    # 对称化（防止数值非对称）
+    Hf = 0.5 * (Hf + Hf.transpose(-1, -2))
+    sigma = 0.5 * (sigma + sigma.transpose(-1, -2))
+    trace = Hf.diagonal(dim1=-2, dim2=-1).sum(dim=-1)  # [G]
     lam = lam_eps * (trace / 4.0 + 1e-12)
-    eye = torch.eye(2, device=H.device, dtype=H.dtype).unsqueeze(0)
-    A_all = torch.zeros((num_groups, 6, 2, 2), device=H.device, dtype=H.dtype)
-    R_all = torch.zeros((num_groups, 6, 2, 2), device=H.device, dtype=H.dtype)
-    cost = torch.zeros((num_groups, 6), device=H.device, dtype=H.dtype)
+    lam = lam.clamp_min(lam_min)
+    I2 = torch.eye(2, device=device, dtype=torch.float32).unsqueeze(0)
+    A_all = torch.empty((num_groups, 6, 2, 2), device=device, dtype=torch.float32)
+    R_all = torch.empty((num_groups, 6, 2, 2), device=device, dtype=torch.float32)
+    cost = torch.empty((num_groups, 6), device=device, dtype=torch.float32)
     for pid in range(6):
         keep = patterns[pid]
         drop = drop_patterns[pid]
-        Hkk = H[:, keep][:, :, keep]
-        Hkp = H[:, keep][:, :, drop]
-        Hpk = H[:, drop][:, :, keep]
-        Hpp = H[:, drop][:, :, drop]
-        inv = torch.linalg.inv(Hkk + lam.unsqueeze(-1).unsqueeze(-1) * eye)
-        A = torch.matmul(inv, Hkp)
-        R = Hpp - torch.matmul(Hpk, torch.matmul(inv, Hkp))
+        Hkk = Hf[:, keep][:, :, keep]
+        Hkp = Hf[:, keep][:, :, drop]
+        Hpk = Hf[:, drop][:, :, keep]
+        Hpp = Hf[:, drop][:, :, drop]
+        A = torch.linalg.solve(Hkk + lam[:, None, None] * I2, Hkp)
+        R = Hpp - Hpk @ A
         A_all[:, pid] = A
         R_all[:, pid] = R
         mu_p = mu[:, drop]
         sigma_pp = sigma[:, drop][:, :, drop]
-        tr_term = (R * sigma_pp).sum(dim=(-1, -2))
+        tr_term = torch.einsum("gij,gij->g", R, sigma_pp)
         quad = torch.einsum("gi,gij,gj->g", mu_p, R, mu_p)
         cost[:, pid] = tr_term + quad
     best = torch.argmin(cost, dim=1)
-    idx = torch.arange(num_groups, device=H.device)
+    idx = torch.arange(num_groups, device=device)
     A_fix = A_all[idx, best]
     return best, A_fix, A_all, R_all
 
@@ -440,8 +451,6 @@ def cali_sparse(args, model, dataloader, dev, logger):
 def cali_x_mask_fixed(args, model, dataloader, dev, logger):
     if not getattr(args, "use_x_mask_fixed", False):
         return model
-    if not args.use_x_mask:
-        return model
 
     model.eval()
     use_cache = model.config.use_cache
@@ -603,9 +612,10 @@ def cali_x_mask_fixed(args, model, dataloader, dev, logger):
             trans.use_x_mask_fixed = True
 
         for trans, use_mask, use_fixed in orig_mask_flags:
-            trans.use_x_mask = use_mask
+            trans.use_x_mask = True
             trans.use_x_mask_fixed = use_fixed if not args.use_x_mask_fixed else True
-
+            trans.x_mask_mode = args.x_mask_mode
+            
         for name, param in layer.named_parameters():
             if name in dtype_dict:
                 param.data = param.to(dtype_dict[name])
@@ -772,7 +782,7 @@ def cali_x_mask_comp(args, model, dataloader, dev, logger):
             else:
                 r = None
                 sel = None
-                trans.x_mode_mode = "hard_top2"
+                trans.x_mask_mode = "hard_top2"
             stats_by_trans[name] = {
                 "num_groups": trans.hidden_dim // 4,
                 "H": H,
@@ -781,8 +791,8 @@ def cali_x_mask_comp(args, model, dataloader, dev, logger):
                 "mode": trans.x_mask_mode,
                 "tau": float(getattr(trans, "x_mask_tau", 1.0)),
                 "hard_mode": getattr(trans, "x_mask_r_mode", "top2"),
-                "num": torch.zeros_like(trans.hidden_dim // 4, device=H.device, dtype=H.dtype),
-                "den": torch.zeros_like(trans.hidden_dim // 4, device=H.device, dtype=H.dtype),
+                "num": torch.zeros(trans.hidden_dim // 4, device=H.device, dtype=H.dtype),
+                "den": torch.zeros(trans.hidden_dim // 4, device=H.device, dtype=H.dtype),
             }
 
         hooks = []
