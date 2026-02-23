@@ -480,8 +480,8 @@ def cali_x_mask_comp(args, model, dataloader, dev, logger):
         def _hook(module, inp, out):
             if out is None:
                 return
-            x = out[0] if isinstance(out, (tuple, list)) else out
-            x = x.float()
+            x0 = out[0] if isinstance(out, (tuple, list)) else out
+            x = x0.float()
             x = x.view(-1, stats["num_groups"], 4)
             scores = x.abs()
             tau = stats["tau"]
@@ -521,6 +521,14 @@ def cali_x_mask_comp(args, model, dataloader, dev, logger):
                 den = den * sel
             stats["num"] += num.sum(dim=0)
             stats["den"] += den.sum(dim=0)
+            mixed_out = mixed.view(x0.shape).to(x0)
+            if isinstance(out, tuple):
+                return (mixed_out,) + out[1:]
+            if isinstance(out, list):
+                out_list = list(out)
+                out_list[0] = mixed_out
+                return out_list
+            return mixed_out
         return _hook
 
     for i in range(len(layers)):
@@ -617,6 +625,7 @@ def cali_x_mask_comp(args, model, dataloader, dev, logger):
             if hasattr(trans, "x_mask_comp") and trans.x_mask_comp is not None:
                 trans.x_mask_comp.data.copy_(comp.to(trans.x_mask_comp.device, dtype=trans.x_mask_comp.dtype))
                 trans.use_x_mask_comp = True
+                trans.use_x_mask = True
 
         mse_post = 0
         with torch.no_grad():
