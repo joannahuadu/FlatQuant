@@ -497,6 +497,9 @@ class SVDDecomposeTransMatrix(nn.Module):
             mask.scatter_(-1, idx, 1.0)
             self._last_x_mask_l2 = (mask.pow(2).sum(dim=-1) - 2.0).pow(2).mean()
             gate = (1.0 - alpha) + alpha * mask
+            if getattr(self, "use_x_mask_comp", False) and self.x_mask_comp is not None:
+                comp = self.x_mask_comp.to(mixed).unsqueeze(-1)
+                gate = gate * comp
             return (reshaped * gate).view_as(tensor)
         if mode == "soft_top2":
             tau = float(getattr(self, "x_mask_tau", 1.0))
