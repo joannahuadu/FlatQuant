@@ -393,7 +393,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         out.scatter_(-1, keep_exp, x_keep)
         return out.view_as(reshaped)
 
-    def _apply_x_mask_online(self, reshaped):
+    def _apply_x_mask_online(self, reshaped, hard_mask=None):
         if not getattr(self, "use_x_mask_fixed", False):
             return None
         if self.x_mask_fixed_A_all is None or self.x_mask_fixed_R_all is None:
@@ -402,20 +402,28 @@ class SVDDecomposeTransMatrix(nn.Module):
             return None
         x = reshaped.view(-1, reshaped.shape[-2], 4)
         A_all = self.x_mask_fixed_A_all.to(x)
-        R_all = self.x_mask_fixed_R_all.to(x)
         patterns = _X_MASK_TOP2_PATTERNS.to(x.device)
         drops = _X_MASK_TOP2_DROP.to(x.device)
 
-        costs = []
-        for pid in range(6):
-            drop = drops[pid]
-            drop_exp = drop.unsqueeze(0).unsqueeze(0).expand(x.shape[0], x.shape[1], -1)
-            x_drop = torch.gather(x, -1, drop_exp)
-            Rm = R_all[:, pid]
-            cost = torch.einsum("bgi,gij,bgj->bg", x_drop, Rm, x_drop)
-            costs.append(cost)
-        cost = torch.stack(costs, dim=-1)
-        best = torch.argmin(cost, dim=-1)
+        if hard_mask is None:
+            R_all = self.x_mask_fixed_R_all.to(x)
+            costs = []
+            for pid in range(6):
+                drop = drops[pid]
+                drop_exp = drop.unsqueeze(0).unsqueeze(0).expand(x.shape[0], x.shape[1], -1)
+                x_drop = torch.gather(x, -1, drop_exp)
+                Rm = R_all[:, pid]
+                cost = torch.einsum("bgi,gij,bgj->bg", x_drop, Rm, x_drop)
+                costs.append(cost)
+            cost = torch.stack(costs, dim=-1)
+            best = torch.argmin(cost, dim=-1)
+        else:
+            hm = hard_mask.view(-1, hard_mask.shape[-2], 4).to(device=x.device, dtype=x.dtype)
+            keep_idx = torch.topk(hm, 2, dim=-1).indices
+            keep_idx, _ = torch.sort(keep_idx, dim=-1)
+            pat = patterns.view(1, 1, -1, 2)
+            match = (keep_idx.unsqueeze(-2) == pat).all(-1)
+            best = torch.argmax(match.to(torch.int64), dim=-1)
 
         keep_idx = patterns[best]
         drop_idx = drops[best]
@@ -552,7 +560,7 @@ class SVDDecomposeTransMatrix(nn.Module):
                     comp = self.x_mask_comp.to(mixed).unsqueeze(-1)
                     mixed = mixed * (1.0 - hard_sel + hard_sel * hard_mask * comp)
                 elif getattr(self, "use_x_mask_fixed", False):
-                    mixed = self._apply_x_mask_online(mixed)
+                    mixed = self._apply_x_mask_online(mixed, hard_mask=hard_mask)
                 else:
                     mixed = mixed * (1.0 - hard_sel + hard_sel * hard_mask)
             if alpha < 1.0:
