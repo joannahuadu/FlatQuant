@@ -514,6 +514,8 @@ def cali_x_mask_fixed(args, model, dataloader, dev, logger):
 
     fp_inps = inps
     fp_outs = torch.zeros_like(inps)
+    ref_outs = torch.zeros_like(inps)
+    loss_func = torch.nn.MSELoss()
 
     def _make_stats_hook(stats):
         def _hook(_module, _inp, out):
@@ -532,12 +534,40 @@ def cali_x_mask_fixed(args, model, dataloader, dev, logger):
         dtype_dict = {name: param.dtype for name, param in layer.named_parameters()}
         with torch.no_grad():
             layer.float()
+        
+        ## origin forward.loss
+        with torch.no_grad():
+            for j in range(args.nsamples // args.cali_bsz):
+                index = j * args.cali_bsz
+                out = layer(
+                    fp_inps[index:index + args.cali_bsz],
+                    attention_mask=attention_mask_batch,
+                    position_ids=position_ids,
+                )[0]
+                ref_outs[index:index + args.cali_bsz] = out
 
-        orig_mask_flags = []
+        ## r_thr forward.loss
         for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
-            orig_mask_flags.append((trans, trans.use_x_mask, trans.use_x_mask_fixed))
-            trans.use_x_mask = False
+            trans.x_mask_r_thr = 0.5
+        mse_pre = 0
+        with torch.no_grad():
+            for j in range(args.nsamples // args.cali_bsz):
+                index = j * args.cali_bsz
+                out = layer(
+                    fp_inps[index:index + args.cali_bsz],
+                    attention_mask=attention_mask_batch,
+                    position_ids=position_ids,
+                )[0]
+                loss = loss_func(ref_outs[index:index + args.cali_bsz], out)
+                mse_pre += loss.detach().cpu()
+
+        for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
+            if "switch" in trans.x_mask_mode:
+                trans.use_x_mask = True
+            else:
+                trans.use_x_mask = False
             trans.use_x_mask_fixed = False
+            trans.x_mask_r_thr = None
 
         stats_by_trans = {}
         for name, trans in (
@@ -564,7 +594,8 @@ def cali_x_mask_fixed(args, model, dataloader, dev, logger):
         ):
             stats = stats_by_trans.get(name, None)
             hooks.append(trans.register_forward_hook(_make_stats_hook(stats)))
-
+        
+        mse_none = 0
         with torch.no_grad():
             for j in range(args.nsamples // args.cali_bsz):
                 index = j * args.cali_bsz
@@ -574,6 +605,8 @@ def cali_x_mask_fixed(args, model, dataloader, dev, logger):
                     position_ids=position_ids,
                 )[0]
                 fp_outs[index:index + args.cali_bsz] = out
+                loss = loss_func(ref_outs[index:index + args.cali_bsz], out)
+                mse_none += loss.detach().cpu()
 
         for h in hooks:
             h.remove()
@@ -611,11 +644,26 @@ def cali_x_mask_fixed(args, model, dataloader, dev, logger):
                 )
             trans.use_x_mask_fixed = True
 
-        for trans, use_mask, use_fixed in orig_mask_flags:
+        for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
             trans.use_x_mask = True
-            trans.use_x_mask_fixed = use_fixed if not args.use_x_mask_fixed else True
+            trans.use_x_mask_fixed = True
+            trans.x_mask_r_thr = 0.5
             trans.x_mask_mode = args.x_mask_mode
-            
+        ## comp forward loss
+        mse_post = 0
+        with torch.no_grad():
+            for j in range(args.nsamples // args.cali_bsz):
+                index = j * args.cali_bsz
+                out = layer(
+                    fp_inps[index:index + args.cali_bsz],
+                    attention_mask=attention_mask_batch,
+                    position_ids=position_ids,
+                )[0]
+                loss = loss_func(ref_outs[index:index + args.cali_bsz], out)
+                mse_post += loss.detach().cpu()
+        
+        logger.info(f"x_mask_comp: layer {i} none mse={float(mse_none):.6f} recon mse pre={float(mse_pre):.6f} post={float(mse_post):.6f}")
+
         for name, param in layer.named_parameters():
             if name in dtype_dict:
                 param.data = param.to(dtype_dict[name])
@@ -954,7 +1002,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     track_x_mask_err = False
     for i in range(num_train_layer):
         logger.info(f"========= Layer {i} =========")
-        layer_lr_scale = 1.0 + (i / max(1, num_train_layer - 1))
+        # layer_lr_scale = 1.0 + 2*(i / max(1, num_train_layer - 1))
+        layer_lr_scale = 1.0
         layer_lr = args.flat_lr * layer_lr_scale
         logger.info(f"layer init lr={layer_lr:.6g} (scale={layer_lr_scale:.3f})")
         target_layer = None
@@ -1010,9 +1059,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     trans.x_mask_track_err = track_x_mask_err
                     trans.x_mask_key_ratio = args.x_mask_key_ratio
                     trans.x_mask_key_k = args.x_mask_key_k
-                    if "switch_top2" in args.x_mask_mode:
+                    if "switch_top2" in args.x_mask_mode and args.trainable_gate:
                         if hasattr(trans, "x_mask_gate_logits"):
-                            trans.x_mask_gate_logits.data.fill_(-2)
+                            trans.x_mask_gate_logits.data.fill_(2)
                 trans.use_x_perm_predictor = args.use_x_perm_predictor
                 if trans.use_x_perm_predictor and trans.x_perm_predictor is None:
                     num_blocks = trans.hidden_dim // trans.block_size
@@ -1057,7 +1106,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         if args.lac:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["clip_factor_a", ]), "lr": layer_lr * 10})
             paras_name.append("clip_factor_a")
-        if args.use_x_mask and "switch_top2" in args.x_mask_mode:
+        if args.use_x_mask and "switch_top2" in args.x_mask_mode and args.trainable_gate:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.x_mask_gate", ]), "lr": layer_lr * 10})
             paras_name.append("trans.x_mask_gate")
 

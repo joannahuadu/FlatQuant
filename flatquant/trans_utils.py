@@ -551,6 +551,8 @@ class SVDDecomposeTransMatrix(nn.Module):
                 if getattr(self, "use_x_mask_comp", False) and self.x_mask_comp is not None:
                     comp = self.x_mask_comp.to(mixed).unsqueeze(-1)
                     mixed = mixed * (1.0 - hard_sel + hard_sel * hard_mask * comp)
+                elif getattr(self, "use_x_mask_fixed", False):
+                    mixed = self._apply_x_mask_online(mixed)
                 else:
                     mixed = mixed * (1.0 - hard_sel + hard_sel * hard_mask)
             if alpha < 1.0:
