@@ -438,10 +438,9 @@ class SVDDecomposeTransMatrix(nn.Module):
         out = x.new_zeros(x.shape)
         out.scatter_(-1, keep_idx, x_keep)
         if hard_sel is not None:
-            h = hard_sel
-            if h.dim() == reshaped.dim() - 1:
-                h = h.unsqueeze(-1)
-            h = h.to(device=out.device, dtype=out.dtype).view(x.shape[0], x.shape[1], 1)
+            h = hard_sel.to(device=out.device, dtype=out.dtype)
+            h = h.view(1, h.shape[0], 1)
+            h = h.expand(x.shape[0], x.shape[1], 1)
             base = reshaped.view_as(out)
             out = base * (1.0 - h) + out * h
         return out.view_as(reshaped)
