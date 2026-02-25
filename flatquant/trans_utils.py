@@ -393,7 +393,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         out.scatter_(-1, keep_exp, x_keep)
         return out.view_as(reshaped)
 
-    def _apply_x_mask_online(self, reshaped, hard_mask=None):
+    def _apply_x_mask_online(self, reshaped, hard_mask=None, hard_sel=None):
         if not getattr(self, "use_x_mask_fixed", False):
             return None
         if self.x_mask_fixed_A_all is None or self.x_mask_fixed_R_all is None:
@@ -437,6 +437,13 @@ class SVDDecomposeTransMatrix(nn.Module):
 
         out = x.new_zeros(x.shape)
         out.scatter_(-1, keep_idx, x_keep)
+        if hard_sel is not None:
+            h = hard_sel
+            if h.dim() == reshaped.dim() - 1:
+                h = h.unsqueeze(-1)
+            h = h.to(device=out.device, dtype=out.dtype).view(x.shape[0], x.shape[1], 1)
+            base = reshaped.view_as(out)
+            out = base * (1.0 - h) + out * h
         return out.view_as(reshaped)
 
     def _apply_x_mask(self, tensor):
@@ -560,7 +567,7 @@ class SVDDecomposeTransMatrix(nn.Module):
                     comp = self.x_mask_comp.to(mixed).unsqueeze(-1)
                     mixed = mixed * (1.0 - hard_sel + hard_sel * hard_mask * comp)
                 elif getattr(self, "use_x_mask_fixed", False):
-                    mixed = self._apply_x_mask_online(mixed, hard_mask=hard_mask)
+                    mixed = self._apply_x_mask_online(mixed, hard_mask=hard_mask, hard_sel=hard_sel)
                 else:
                     mixed = mixed * (1.0 - hard_sel + hard_sel * hard_mask)
             if alpha < 1.0:
