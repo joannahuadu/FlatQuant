@@ -1090,6 +1090,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 trans.use_x_perm = args.use_x_perm
                 trans.use_x_mask = args.use_x_mask if args.nm_zero_weight==0 else False
                 if trans.use_x_mask:
+                    trans.x_mask_gate_num_codes = args.x_mask_gate_num_codes
                     trans.x_mask_mode = args.x_mask_mode
                     trans.x_mask_tau = args.x_mask_tau
                     trans.x_mask_track_err = track_x_mask_err

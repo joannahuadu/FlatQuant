@@ -163,7 +163,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         x_perm_pred_hidden=128,
         x_perm_num_buckets=64,
         x_perm_kmeans_iters=5,
-        x_mask_gate_num_codes=1,
+        x_mask_gate_num_codes=64,
         x_mask_gate_router_dim=256,
     ):
         super(SVDDecomposeTransMatrix, self).__init__()
