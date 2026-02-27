@@ -68,16 +68,12 @@ def main():
             train_utils.cali_flat_quant(args, model, trainloader, utils.DEV, logger=logger)
         if args.save_matrix and not args.reload_matrix:
             flat_utils.save_flat_matrices(args, model)
-        if args.x_mask_track_err or args.x_mask_use_err:
-            use_x_mask = False
-        else:
-            use_x_mask = args.use_x_mask
         flat_utils.reparameterize_model(
             model,
             use_x_perm=args.use_x_perm,
             use_perm=args.use_perm,
             use_comp_mask=args.use_comp_mask,
-            use_x_mask=use_x_mask,
+            use_x_mask=args.use_x_mask,
             x_mask_mode=args.x_mask_mode,
             x_mask_tau=args.x_mask_tau,
             x_mask_r_thr=args.x_mask_r_thr,
@@ -96,7 +92,7 @@ def main():
             quantizers = gptq_utils.rtn_fwrd(model, utils.DEV, args)
         save_dict["w_quantizers"] = quantizers
 
-    if args.x_mask_track_err or args.x_mask_use_err:
+    if args.x_mask_track_err or args.x_mask_use_err or args.x_mask_use_r:
         train_utils.cali_sparse(args, model, trainloader, utils.DEV, logger)
     if args.use_x_mask_fixed:
         train_utils.cali_x_mask_fixed(args, model, trainloader, utils.DEV, logger)
