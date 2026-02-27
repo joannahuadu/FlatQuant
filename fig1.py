@@ -90,7 +90,7 @@ def main():
     parser.add_argument(
         "--pth",
         type=Path,
-        default=Path("./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260215_014049/flat_matrices.pth"),
+        default=Path("/gemini/code/NMSparsity/FlatQuant/outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260215_014049/flat_matrices.pth"),
         help="Path to flat_matrices.pth",
     )
     parser.add_argument(
@@ -99,7 +99,7 @@ def main():
         default=Path("."),
         help="Output directory for heatmaps",
     )
-    parser.add_argument("--dim", type=int, default=1024, help="r dimension")
+    # parser.add_argument("--dim", type=int, default=1024, help="r dimension")
     parser.add_argument("--dpi", type=int, default=200, help="output dpi")
     args = parser.parse_args()
 
@@ -119,7 +119,11 @@ def main():
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     for prefix in prefixes:
-        mat = _build_matrix(state, prefix, num_layers, args.dim)
+        if "down" in prefix:
+            dim = 3584
+        else:
+            dim = 1024
+        mat = _build_matrix(state, prefix, num_layers, dim)
         out_path = args.out_dir / f"r_heatmap_{_sanitize(prefix)}.png"
         _plot_heatmap(mat, prefix, out_path, dpi=args.dpi)
         print(f"Saved: {out_path}")
