@@ -217,6 +217,8 @@ def _compute_fixed_patterns(H, sum_x, sum_xx, count, lam_eps, lam_min=1e-6):
 
 def _compute_r_for_trans(trans, mode):
     logits = trans.x_mask_gate_logits
+    if logits is not None and logits.dim() == 2:
+        logits = logits.mean(dim=0)
     return torch.sigmoid(logits)
 
 def cali_sparse(args, model, dataloader, dev, logger):
@@ -452,7 +454,10 @@ def cali_sparse(args, model, dataloader, dev, logger):
                     trans.x_mask_key_k = args.x_mask_key_k
                     trans.x_mask_use_r = True
                     trans.x_mask_use_non_key = args.x_mask_use_non_key
-                r = torch.sigmoid(trans.x_mask_gate_logits)
+                logits = trans.x_mask_gate_logits
+                if logits is not None and logits.dim() == 2:
+                    logits = logits.mean(dim=0)
+                r = torch.sigmoid(logits)
                 non_key_idx = torch.topk(r, trans.x_mask_key_k, largest=False).indices
                 key_idx = torch.topk(r, trans.x_mask_key_k, largest=True).indices
                 if key_idx is not None:
@@ -1416,9 +1421,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                 if gate_mean is None:
                                     continue
                                 if args.x_mask_gate_target is None:
-                                    cost = gate_mean
+                                    cost = gate_mean.mean()
                                 else:
-                                    cost = (gate_mean - args.x_mask_gate_target) ** 2
+                                    cost = ((gate_mean - args.x_mask_gate_target) ** 2).mean()
                                 gate_cost = cost if gate_cost is None else gate_cost + cost
                             if gate_cost is not None:
                                 loss = loss + args.x_mask_gate_cost * gate_cost

@@ -51,7 +51,10 @@ def _build_matrix(state, prefix, num_layers, dim):
         key = f"{prefix}.x_mask_gate_logits"
         if key not in layer:
             continue
-        logits = layer[key].detach().float().flatten()
+        logits = layer[key].detach().float()
+        if logits.dim() == 2:
+            logits = logits.mean(dim=0)
+        logits = logits.flatten()
         if logits.numel() != dim:
             continue
         r = torch.sigmoid(logits).cpu().numpy()
