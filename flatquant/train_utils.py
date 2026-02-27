@@ -222,7 +222,8 @@ def _compute_r_for_trans(trans, mode):
 def cali_sparse(args, model, dataloader, dev, logger):
     track_x_mask_err = args.x_mask_track_err
     load_x_mask_err = args.x_mask_use_err
-    if not (track_x_mask_err or load_x_mask_err):
+    load_r_key_err = args.x_mask_use_r
+    if not (track_x_mask_err or load_x_mask_err or load_r_key_err):
         return model
 
     model.eval()
@@ -309,21 +310,9 @@ def cali_sparse(args, model, dataloader, dev, logger):
         with torch.no_grad():
             layer.float()
 
-        layer.self_attn._ori_mode = True
-        layer.mlp._ori_mode = True
         with torch.no_grad():
             for j in range(args.nsamples):
                 fp_outs[j] = layer(fp_inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
-        layer.self_attn._ori_mode = False
-        layer.mlp._ori_mode = False
-
-        if args.diag_init == "sq_style":
-            layer.self_attn.init_diag_scale(alpha=args.diag_alpha)
-            layer.mlp.init_diag_scale(alpha=args.diag_alpha)
-        elif args.diag_init == "one_style":
-            pass
-        else:
-            raise NotImplementedError
 
         layer = layer.to(dev)
 
@@ -341,9 +330,6 @@ def cali_sparse(args, model, dataloader, dev, logger):
                     trans.x_mask_track_err = track_x_mask_err
                     trans.x_mask_key_ratio = args.x_mask_key_ratio
                     trans.x_mask_key_k = args.x_mask_key_k
-                    if "switch_top2" in args.x_mask_mode:
-                        if hasattr(trans, "x_mask_gate_logits"):
-                            trans.x_mask_gate_logits.data.fill_(10)
             with torch.no_grad():
                 for j in range(args.nsamples // args.cali_bsz):
                     index = j * args.cali_bsz
@@ -396,7 +382,7 @@ def cali_sparse(args, model, dataloader, dev, logger):
             torch.cuda.empty_cache()
             continue
 
-        if load_x_mask_err:
+        elif load_x_mask_err:
             if x_mask_err_data is None:
                 if not os.path.exists(x_mask_err_path):
                     raise FileNotFoundError(f"x_mask err file not found: {x_mask_err_path}")
@@ -432,6 +418,51 @@ def cali_sparse(args, model, dataloader, dev, logger):
                     index = j * args.cali_bsz
                     _ = layer(fp_inps[index:index + args.cali_bsz], attention_mask=attention_mask_batch, position_ids=position_ids)[0]
 
+            for name, param in layer.named_parameters():
+                if name in dtype_dict:
+                    param.data = param.to(dtype_dict[name])
+            fp_inps, fp_outs = fp_outs, fp_inps
+            layers[i] = layer.to("cpu")
+            del layer
+            torch.cuda.empty_cache()
+            continue
+        elif load_r_key_err:
+            if i >= 10:
+                logger.info(f"Continue layer{i}")
+                for name, param in layer.named_parameters():
+                    if name in dtype_dict:
+                        param.data = param.to(dtype_dict[name])
+                fp_inps, fp_outs = fp_outs, fp_inps
+                layers[i] = layer.to("cpu")
+                del layer
+                torch.cuda.empty_cache()
+                continue
+            for name, trans in (
+                ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                ("mlp.down_trans", layer.mlp.down_trans),
+            ):
+                trans.use_x_perm = args.use_x_perm
+                trans.use_x_mask = args.use_x_mask
+                if trans.use_x_mask:
+                    trans.x_mask_mode = args.x_mask_mode
+                    trans.x_mask_tau = args.x_mask_tau
+                    trans.x_mask_track_err = False
+                    trans.x_mask_key_ratio = args.x_mask_key_ratio
+                    trans.x_mask_key_k = args.x_mask_key_k
+                    trans.x_mask_use_r = True
+                    trans.x_mask_use_non_key = args.x_mask_use_non_key
+                r = torch.sigmoid(trans.x_mask_gate_logits)
+                non_key_idx = torch.topk(r, trans.x_mask_key_k, largest=False).indices
+                key_idx = torch.topk(r, trans.x_mask_key_k, largest=True).indices
+                if key_idx is not None:
+                    trans.x_mask_key_idx = key_idx.to(device=dev, dtype=torch.long)
+                if non_key_idx is not None:
+                    trans.x_mask_non_key_idx = non_key_idx.to(device=dev, dtype=torch.long)
+            with torch.no_grad():
+                for j in range(args.nsamples // args.cali_bsz):
+                    index = j * args.cali_bsz
+                    _ = layer(fp_inps[index:index + args.cali_bsz], attention_mask=attention_mask_batch, position_ids=position_ids)[0]
             for name, param in layer.named_parameters():
                 if name in dtype_dict:
                     param.data = param.to(dtype_dict[name])

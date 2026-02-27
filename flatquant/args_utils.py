@@ -188,6 +188,8 @@ def parser_gen():
                         help="Directory to save/load x_mask_err_by_layer.pt (required if tracking or using err).")
     parser.add_argument("--x_mask_use_err", action="store_true", default=False,
                         help="Load x_mask_err_by_layer.pt and use saved key/non-key indices.")
+    parser.add_argument("--x_mask_use_r", action="store_true", default=False,
+                        help="Load x_mask_err_by_layer.pt and use saved key/non-key indices.")
     parser.add_argument("--x_mask_use_non_key", action="store_true", default=False,
                         help="Use non-key indices (instead of key indices) when building r.")
     parser.add_argument("--x_mask_key_ratio", type=float, default=None,

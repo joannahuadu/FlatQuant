@@ -197,6 +197,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.x_mask_key_ratio = None
         self.x_mask_key_k = None
         self.x_mask_use_err = False
+        self.x_mask_use_r = False
         self.x_mask_use_non_key = False
         self._x_mask_err_sum = None
         self._x_mask_err_count = 0
@@ -569,6 +570,18 @@ class SVDDecomposeTransMatrix(nn.Module):
                     mixed = self._apply_x_mask_online(mixed, hard_mask=hard_mask, hard_sel=hard_sel)
                 else:
                     mixed = mixed * (1.0 - hard_sel + hard_sel * hard_mask)
+            if self.x_mask_use_r:
+                use_non_key = self.x_mask_use_non_key
+                idx = self.x_mask_non_key_idx if use_non_key else self.x_mask_key_idx
+                if idx is not None:
+                    if not torch.is_tensor(idx):
+                        idx = torch.tensor(idx, dtype=torch.long, device=logits.device)
+                    else:
+                        idx = idx.to(device=logits.device, dtype=torch.long)
+                    hard_sel = torch.zeros_like(logits)
+                    hard_sel[idx] = 1.0
+                    hard_sel = hard_sel.view(1, 1, hard_sel.shape[0], 1).to(gate_raw).expand_as(gate_raw)
+                    mixed = mixed * (1.0 - hard_sel + hard_sel * gate_raw)
             if alpha < 1.0:
                 mixed = (1.0 - alpha) * reshaped + alpha * mixed
             return mixed.view_as(tensor)
