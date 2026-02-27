@@ -220,6 +220,12 @@ class SVDDecomposeTransMatrix(nn.Module):
         if self.x_mask_gate_num_codes > 1 and self.x_mask_gate_router_dim > 0:
             self.x_mask_gate_router_down = nn.Linear(left_size * right_size, self.x_mask_gate_router_dim, bias=True)
             self.x_mask_gate_router_up = nn.Linear(self.x_mask_gate_router_dim, self.x_mask_gate_num_codes, bias=True)
+            nn.init.trunc_normal_(self.x_mask_gate_router_down.weight, std=0.02)
+            nn.init.trunc_normal_(self.x_mask_gate_router_up.weight, std=0.02)
+            if self.x_mask_gate_router_down.bias is not None:
+                nn.init.zeros_(self.x_mask_gate_router_down.bias)
+            if self.x_mask_gate_router_up.bias is not None:
+                nn.init.zeros_(self.x_mask_gate_router_up.bias)
         else:
             self.x_mask_gate_router_down = None
             self.x_mask_gate_router_up = None
@@ -720,21 +726,9 @@ class SVDDecomposeTransMatrix(nn.Module):
             base = codebook.mean(dim=0)
             return base.view(*([1] * (tensor.dim() - 1)), -1).expand(*tensor.shape[:-1], -1)
         x_flat = tensor.reshape(-1, tensor.shape[-1])
-        w1 = self.x_mask_gate_router_down.weight.to(tensor)
-        b1 = self.x_mask_gate_router_down.bias
-        if b1 is not None:
-            b1 = b1.to(tensor)
-        h = torch.matmul(x_flat, w1.t())
-        if b1 is not None:
-            h = h + b1
+        h = self.x_mask_gate_router_down(x_flat)
         h = F.silu(h)
-        w2 = self.x_mask_gate_router_up.weight.to(tensor)
-        b2 = self.x_mask_gate_router_up.bias
-        if b2 is not None:
-            b2 = b2.to(tensor)
-        router_logits = torch.matmul(h, w2.t())
-        if b2 is not None:
-            router_logits = router_logits + b2
+        router_logits = self.x_mask_gate_router_up(h)
         router_logits = router_logits.view(*tensor.shape[:-1], -1)
         tau = float(getattr(self, "x_mask_gate_router_tau", 1.0))
         if tau <= 0.0:
