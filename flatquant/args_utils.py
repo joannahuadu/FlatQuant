@@ -163,6 +163,10 @@ def parser_gen():
                         choices=["top2", "gate_raw"],
                         help="Hard mask source for r < thr in switch_top2 modes: "
                              "top2 uses mixed activations; gate_raw uses the raw gate.")
+    parser.add_argument("--x_mask_gate_num_codes", type=int, default=1,
+                        help="Number of codebook entries for x_mask gate logits.")
+    parser.add_argument("--x_mask_gate_router_dim", type=int, default=256,
+                        help="Hidden size for low-rank x_mask gate router (x_t -> dim -> N).")
     parser.add_argument("--trainable_gate", action="store_true", default=False,
                         help="if training x mask gate")
     parser.add_argument("--use_x_mask_comp", action="store_true", default=False,

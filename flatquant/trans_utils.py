@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from flatquant.flat_utils import kronecker_matmul, _kronecker_matmul_masked
 from flatquant.function_utils import get_init_weight, get_inverse
@@ -162,6 +163,8 @@ class SVDDecomposeTransMatrix(nn.Module):
         x_perm_pred_hidden=128,
         x_perm_num_buckets=64,
         x_perm_kmeans_iters=5,
+        x_mask_gate_num_codes=1,
+        x_mask_gate_router_dim=256,
     ):
         super(SVDDecomposeTransMatrix, self).__init__()
         self.linear_u_left = nn.Linear(left_size, left_size, bias=False, dtype=torch.float32)
@@ -206,7 +209,20 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.x_mask_key_mask = None
         self.x_mask_non_key_mask = None
         self.x_mask_non_key_idx = None
-        self.x_mask_gate_logits = nn.Parameter(torch.zeros((left_size * right_size) // 4, dtype=torch.float32), requires_grad=True)
+        num_groups = (left_size * right_size) // 4
+        self.x_mask_gate_num_codes = int(x_mask_gate_num_codes) if x_mask_gate_num_codes is not None else 1
+        if self.x_mask_gate_num_codes < 1:
+            self.x_mask_gate_num_codes = 1
+        self.x_mask_gate_router_dim = int(x_mask_gate_router_dim) if x_mask_gate_router_dim is not None else 0
+        self.x_mask_gate_logits = nn.Parameter(
+            torch.zeros((self.x_mask_gate_num_codes, num_groups), dtype=torch.float32), requires_grad=True
+        )
+        if self.x_mask_gate_num_codes > 1 and self.x_mask_gate_router_dim > 0:
+            self.x_mask_gate_router_down = nn.Linear(left_size * right_size, self.x_mask_gate_router_dim, bias=True)
+            self.x_mask_gate_router_up = nn.Linear(self.x_mask_gate_router_dim, self.x_mask_gate_num_codes, bias=True)
+        else:
+            self.x_mask_gate_router_down = None
+            self.x_mask_gate_router_up = None
         self.use_x_mask_comp = False
         self.x_mask_comp = nn.Parameter(torch.ones((left_size * right_size) // 4, dtype=torch.float32), requires_grad=False)
         self.use_x_mask_fixed = False
@@ -488,9 +504,9 @@ class SVDDecomposeTransMatrix(nn.Module):
             self._last_x_mask_l2 = (gate_raw.pow(2).sum(dim=-1) - 2.0).pow(2).mean()
             x_sp = reshaped * gate_raw
             self._update_x_mask_err(reshaped, x_sp)
-            logits = self.x_mask_gate_logits.to(reshaped)
+            logits = self._compute_x_mask_gate_logits(tensor)
             r = torch.sigmoid(logits)
-            self._last_x_mask_gate_mean = r.mean()
+            self._last_x_mask_gate_mean = r.mean(dim=-1)
             r_clamped = r.clamp(min=1e-6, max=1.0 - 1e-6)
             self._last_x_mask_gate_entropy = (
                 -(r_clamped * torch.log(r_clamped) + (1.0 - r_clamped) * torch.log(1.0 - r_clamped)).mean()
@@ -529,7 +545,7 @@ class SVDDecomposeTransMatrix(nn.Module):
             self._last_x_mask_l2 = (gate_raw.pow(2).sum(dim=-1) - 2.0).pow(2).mean()
             x_sp = reshaped * gate_raw
             self._update_x_mask_err(reshaped, x_sp)
-            logits = self.x_mask_gate_logits.to(reshaped)
+            logits = self._compute_x_mask_gate_logits(tensor)
             r = None
             if self.x_mask_use_err:
                 use_non_key = self.x_mask_use_non_key
@@ -540,13 +556,13 @@ class SVDDecomposeTransMatrix(nn.Module):
                     else:
                         idx = idx.to(device=logits.device, dtype=torch.long)
                     r = torch.ones_like(logits)
-                    r[idx] = 0.0
+                    r[..., idx] = 0.0
             if r is None:
                 if self.x_mask_track_err:
                     r = torch.ones_like(logits)
                 else:
                     r = torch.sigmoid(logits)
-            self._last_x_mask_gate_mean = r.mean()
+            self._last_x_mask_gate_mean = r.mean(dim=-1)
             r_clamped = r.clamp(min=1e-6, max=1.0 - 1e-6)
             self._last_x_mask_gate_entropy = (
                 -(r_clamped * torch.log(r_clamped) + (1.0 - r_clamped) * torch.log(1.0 - r_clamped)).mean()
@@ -578,7 +594,7 @@ class SVDDecomposeTransMatrix(nn.Module):
                         idx = torch.tensor(idx, dtype=torch.long, device=logits.device)
                     else:
                         idx = idx.to(device=logits.device, dtype=torch.long)
-                    hard_sel = torch.zeros_like(logits)
+                    hard_sel = torch.zeros(logits.shape[-1], device=logits.device, dtype=logits.dtype)
                     hard_sel[idx] = 1.0
                     hard_sel = hard_sel.view(1, 1, hard_sel.shape[0], 1).to(gate_raw).expand_as(gate_raw)
                     mixed = mixed * (1.0 - hard_sel + hard_sel * gate_raw)
@@ -599,9 +615,9 @@ class SVDDecomposeTransMatrix(nn.Module):
             self._last_x_mask_l2 = (gate_raw.pow(2).sum(dim=-1) - 2.0).pow(2).mean()
             x_sp = reshaped * gate_raw
             self._update_x_mask_err(reshaped, x_sp)
-            logits = self.x_mask_gate_logits.to(reshaped)
+            logits = self._compute_x_mask_gate_logits(tensor)
             r = torch.sigmoid(logits)
-            self._last_x_mask_gate_mean = r.mean()
+            self._last_x_mask_gate_mean = r.mean(dim=-1)
             r_clamped = r.clamp(min=1e-6, max=1.0 - 1e-6)
             self._last_x_mask_gate_entropy = (
                 -(r_clamped * torch.log(r_clamped) + (1.0 - r_clamped) * torch.log(1.0 - r_clamped)).mean()
@@ -691,6 +707,43 @@ class SVDDecomposeTransMatrix(nn.Module):
             self.matrix_right_inv = nn.Parameter(matrix_right_inv, requires_grad=False)
             del self.linear_u_left, self.linear_diag_left, self.linear_v_left, self.linear_u_right, self.linear_diag_right, self.linear_v_right
             self._eval_mode = True
+
+    def _compute_x_mask_gate_logits(self, tensor):
+        logits = self.x_mask_gate_logits
+        if logits is None or logits.numel() == 0:
+            return tensor.new_zeros(*tensor.shape[:-1], (tensor.shape[-1] // 4))
+        if logits.dim() == 1:
+            base = logits.to(tensor)
+            return base.view(*([1] * (tensor.dim() - 1)), -1).expand(*tensor.shape[:-1], -1)
+        codebook = logits.to(tensor)
+        if self.x_mask_gate_router_down is None or self.x_mask_gate_router_up is None:
+            base = codebook.mean(dim=0)
+            return base.view(*([1] * (tensor.dim() - 1)), -1).expand(*tensor.shape[:-1], -1)
+        x_flat = tensor.reshape(-1, tensor.shape[-1])
+        w1 = self.x_mask_gate_router_down.weight.to(tensor)
+        b1 = self.x_mask_gate_router_down.bias
+        if b1 is not None:
+            b1 = b1.to(tensor)
+        h = torch.matmul(x_flat, w1.t())
+        if b1 is not None:
+            h = h + b1
+        h = F.silu(h)
+        w2 = self.x_mask_gate_router_up.weight.to(tensor)
+        b2 = self.x_mask_gate_router_up.bias
+        if b2 is not None:
+            b2 = b2.to(tensor)
+        router_logits = torch.matmul(h, w2.t())
+        if b2 is not None:
+            router_logits = router_logits + b2
+        router_logits = router_logits.view(*tensor.shape[:-1], -1)
+        tau = float(getattr(self, "x_mask_gate_router_tau", 1.0))
+        if tau <= 0.0:
+            idx = router_logits.argmax(dim=-1)
+            weights = torch.zeros_like(router_logits)
+            weights.scatter_(-1, idx.unsqueeze(-1), 1.0)
+        else:
+            weights = torch.softmax(router_logits / tau, dim=-1)
+        return torch.einsum("...k,kg->...g", weights, codebook)
 
     def __repr__(self):
         res = f"SVDDecomposeTransMatrix(_eval_mode={self._eval_mode}"
