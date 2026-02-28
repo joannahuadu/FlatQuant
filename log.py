@@ -1,3 +1,5 @@
+import os
+
 import torch
 import transformers
 
@@ -42,7 +44,15 @@ def configure_act_sparsity(model, args, logger):
         logger.info(f"{act_sparsity_n}:{act_sparsity_m} {args.act_sparsity_location} sparsity enabled: {name}")
 
 
-def _log_xq_stats(x_q, tag, logger, logged):
+def _log_xq_stats(
+    x_q,
+    tag,
+    logger,
+    logged,
+    out_dir=None,
+    bins=120,
+    max_points=200_000,
+):
     if tag in logged:
         return
     with torch.no_grad():
@@ -58,6 +68,43 @@ def _log_xq_stats(x_q, tag, logger, logged):
             logger.info(f"[{tag}] zero_ratio={zero_ratio:.6f}, two_zeros_ratio={two_zeros_ratio:.6f}")
         else:
             logger.info(f"[{tag}] zero_ratio={zero_ratio:.6f} (last dim not divisible by 4)")
+
+        if out_dir is not None:
+            try:
+                import numpy as np
+                import matplotlib
+
+                matplotlib.use("Agg")
+                import matplotlib.pyplot as plt
+            except Exception as exc:
+                logger.warning(f"[{tag}] skip plot (matplotlib import failed): {exc}")
+            else:
+                os.makedirs(out_dir, exist_ok=True)
+                flat = x_q.detach().float().view(-1)
+                if flat.numel() > max_points:
+                    idx = torch.randint(0, flat.numel(), (max_points,), device=flat.device)
+                    flat = flat[idx]
+                data = flat.cpu().numpy()
+                mean = float(data.mean())
+                std = float(data.std())
+
+                fig = plt.figure(figsize=(5.2, 3.4))
+                plt.hist(data, bins=bins, density=True, alpha=0.7, color="#8ecae6")
+                if std > 0:
+                    xs = np.linspace(mean - 4 * std, mean + 4 * std, 200)
+                    pdf = (1.0 / (std * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((xs - mean) / std) ** 2)
+                    plt.plot(xs, pdf, "--", color="#023047", linewidth=1.5, label="Normal fit")
+                    plt.legend()
+                plt.title(tag)
+                plt.xlabel("Activation Value")
+                plt.ylabel("Density")
+                plt.tight_layout()
+
+                safe_tag = tag.replace("/", "_").replace(".", "_")
+                out_path = os.path.join(out_dir, f"{safe_tag}_dist.png")
+                plt.savefig(out_path, dpi=200)
+                plt.close(fig)
+                logger.info(f"[{tag}] saved activation distribution: {out_path}")
         logged.add(tag)
 
 
@@ -74,27 +121,45 @@ def _is_target_module(name: str) -> bool:
     return name.endswith(suffixes)
 
 
-def _register_log_hooks(model, logger):
+def _register_log_hooks(model, logger, args):
     logged = set()
-    for name, module in model.named_modules():
-        if not isinstance(module, FlatQuantizedLinear):
-            continue
-        if not _is_target_module(name):
-            continue
+    plot_dir = os.path.join(args.exp_dir, "act_dist")
+    if args.quantize:
+        for name, module in model.named_modules():
+            if not isinstance(module, FlatQuantizedLinear):
+                continue
+            if not _is_target_module(name):
+                continue
 
-        orig_eval_forward = module._eval_forward
+            orig_eval_forward = module._eval_forward
 
-        def eval_forward_hook(hidden_states, _module=module, _name=name):
-            x_dtype = hidden_states.dtype
-            x = _module._maybe_sparse(hidden_states, "pre_quant")
-            x_q = _module.act_quantizer(x)
-            _log_xq_stats(x_q, tag=_name, logger=logger, logged=logged)
-            x_q = _module._maybe_sparse(x_q, "post_quant")
-            x_q = x_q.to(x_dtype)
-            return _module.linear(x_q)
+            def eval_forward_hook(hidden_states, _module=module, _name=name):
+                x_dtype = hidden_states.dtype
+                x = _module._maybe_sparse(hidden_states, "pre_quant")
+                x_q = _module.act_quantizer(x)
+                _log_xq_stats(x_q, tag=_name, logger=logger, logged=logged, out_dir=plot_dir)
+                x_q = _module._maybe_sparse(x_q, "post_quant")
+                x_q = x_q.to(x_dtype)
+                return _module.linear(x_q)
 
-        module._eval_forward = eval_forward_hook
-        module._log_wrapped = True
+            module._eval_forward = eval_forward_hook
+            module._log_wrapped = True
+    else:
+        # BF16 (no quantization): log the original input to target modules.
+        for name, module in model.named_modules():
+            if not isinstance(module, torch.nn.Linear):
+                continue
+            if not _is_target_module(name):
+                continue
+
+            def forward_hook(_module, inputs, _output, _name=name):
+                if not inputs:
+                    return
+                hidden_states = inputs[0]
+                _log_xq_stats(hidden_states, tag=_name, logger=logger, logged=logged, out_dir=plot_dir)
+
+            handle = module.register_forward_hook(forward_hook)
+            module._log_hook_handle = handle
 
     return logged
 
@@ -158,7 +223,7 @@ def main():
         model.to(utils.DEV)
 
     # register observation hook after model moves to device
-    _register_log_hooks(model, logger)
+    _register_log_hooks(model, logger, args)
 
     # Evaluating PPL on WikiText-2
     for eval_dataset in ["wikitext2"]:
