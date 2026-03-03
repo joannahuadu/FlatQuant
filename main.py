@@ -60,11 +60,36 @@ def main():
         logger.info("Finished applying FlatQuant to model.")
         if args.act_sparsity:
             configure_act_sparsity(model, args, logger)
+        flat_utils.configure_x_mask_token_gate(
+            model,
+            use_x_mask=args.use_x_mask,
+            x_mask_mode=args.x_mask_mode,
+            x_mask_token_gate_mode=args.x_mask_token_gate_mode,
+            x_mask_token_gate_deep_ratio=args.x_mask_token_gate_deep_ratio,
+            x_mask_token_gate_deep_start=args.x_mask_token_gate_deep_start,
+            x_mask_token_mlp_hidden=args.x_mask_token_mlp_hidden,
+            x_mask_token_mlp_chunk_size=args.x_mask_token_mlp_chunk_size,
+            x_mask_token_mlp_shared=args.x_mask_token_mlp_shared,
+            x_mask_token_use_layer_scale=args.x_mask_token_use_layer_scale,
+        )
         if args.resume:
             flat_utils.load_flat_parameters(args, model, path=args.matrix_path)
         if args.reload_matrix:
             flat_utils.load_flat_matrices(args, model, path=args.matrix_path)
-        elif (args.cali_trans or args.add_diag or args.lwc or args.lac or args.soft_x_perm or args.soft_perm):
+        elif (
+            args.cali_trans
+            or args.add_diag
+            or args.lwc
+            or args.lac
+            or args.soft_x_perm
+            or args.soft_perm
+            or (
+                getattr(args, "use_x_mask", False)
+                and "switch_top2" in str(getattr(args, "x_mask_mode", ""))
+                and (getattr(args, "trainable_gate", False) or getattr(args, "trainable_token_gate", False))
+            )
+            or getattr(args, "trainable_x_mask_fixed_strength", False)
+        ):
             train_utils.cali_flat_quant(args, model, trainloader, utils.DEV, logger=logger)
         if args.save_matrix and not args.reload_matrix:
             flat_utils.save_flat_matrices(args, model)
@@ -85,6 +110,13 @@ def main():
             use_x_perm_predictor=args.use_x_perm_predictor,
             x_perm_num_clusters=args.x_perm_num_clusters,
             x_perm_pred_hidden=args.x_perm_pred_hidden,
+            x_mask_token_gate_mode=args.x_mask_token_gate_mode,
+            x_mask_token_gate_deep_ratio=args.x_mask_token_gate_deep_ratio,
+            x_mask_token_gate_deep_start=args.x_mask_token_gate_deep_start,
+            x_mask_token_mlp_hidden=args.x_mask_token_mlp_hidden,
+            x_mask_token_mlp_chunk_size=args.x_mask_token_mlp_chunk_size,
+            x_mask_token_mlp_shared=args.x_mask_token_mlp_shared,
+            x_mask_token_use_layer_scale=args.x_mask_token_use_layer_scale,
         )
         logger.info("Finished reparameterize model.")
 

@@ -11,7 +11,7 @@ import transformers
 
 from flatquant.function_utils import set_require_grad_all, get_n_set_parameters_byname, get_paras_dict_by_name, check_params_grad
 from flatquant.quant_utils import set_quantizer_state
-from flatquant.flat_utils import kronecker_matmul
+from flatquant.flat_utils import kronecker_matmul, configure_x_mask_token_gate
 from flatquant.trans_utils import apply_x_mask_online
 
 def _get_right_matrix(trans):
@@ -568,7 +568,11 @@ def _proj_x_mask_online_pre_hook(module, inputs):
     if alpha <= 0.0:
         return None
     reshaped = x.reshape(*x.shape[:-1], -1, 4)
-    out = apply_x_mask_online(reshaped, A_all.to(x), R_all.to(x))
+    strength_logits = getattr(module, "x_mask_fixed_strength_logits", None)
+    strength = None
+    if strength_logits is not None and torch.is_tensor(strength_logits) and strength_logits.numel() > 0:
+        strength = torch.sigmoid(strength_logits).to(device=x.device, dtype=x.dtype)
+    out = apply_x_mask_online(reshaped, A_all.to(x), R_all.to(x), comp_strength=strength)
     if alpha < 1.0:
         out = (1.0 - alpha) * reshaped + alpha * out
     return (out.reshape_as(x),) + inputs[1:]
@@ -602,6 +606,13 @@ def _set_proj_x_mask_fixed_ar(proj, A_all, R_all):
     proj.use_x_mask_fixed = True
     if not hasattr(proj, "x_mask_alpha"):
         proj.x_mask_alpha = 1.0
+    if not hasattr(proj, "x_mask_fixed_strength_logits") or proj.x_mask_fixed_strength_logits is None:
+        init_strength = 0.95
+        init_logit = float(torch.logit(torch.tensor(init_strength)))
+        proj.x_mask_fixed_strength_logits = nn.Parameter(
+            torch.full((A_all.shape[0], 1), init_logit, dtype=torch.float32),
+            requires_grad=False,
+        )
 
 
 def cali_x_mask_fixed_per(args, model, dataloader, dev, logger):
@@ -1152,6 +1163,22 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     use_cache = model.config.use_cache
     model.config.use_cache = False
 
+    if getattr(args, "trainable_x_mask_fixed_strength", False) and getattr(args, "use_x_mask_fixed", False):
+        cali_x_mask_fixed_per(args, model, dataloader, dev, logger)
+
+    configure_x_mask_token_gate(
+        model,
+        use_x_mask=getattr(args, "use_x_mask", False),
+        x_mask_mode=getattr(args, "x_mask_mode", "hard_fixed"),
+        x_mask_token_gate_mode=getattr(args, "x_mask_token_gate_mode", "static_all"),
+        x_mask_token_gate_deep_ratio=getattr(args, "x_mask_token_gate_deep_ratio", 0.5),
+        x_mask_token_gate_deep_start=getattr(args, "x_mask_token_gate_deep_start", -1),
+        x_mask_token_mlp_hidden=getattr(args, "x_mask_token_mlp_hidden", 0),
+        x_mask_token_mlp_chunk_size=getattr(args, "x_mask_token_mlp_chunk_size", 1024),
+        x_mask_token_mlp_shared=getattr(args, "x_mask_token_mlp_shared", True),
+        x_mask_token_use_layer_scale=getattr(args, "x_mask_token_use_layer_scale", True),
+    )
+
     # check trainable parameters
     for name, param in model.named_parameters():
         param.requires_grad = False
@@ -1271,6 +1298,26 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         set_require_grad_all(layer, False)
         trained_params, paras_name = [], []
         perm_logits = {}
+
+        # Configure activation 2:4 mask for this layer (independent of permutation flags).
+        for _name, trans in (
+            ("self_attn.ln_trans", layer.self_attn.ln_trans),
+            ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+            ("mlp.down_trans", layer.mlp.down_trans),
+        ):
+            trans.use_x_mask = args.use_x_mask if args.nm_zero_weight == 0 else False
+            if not trans.use_x_mask:
+                continue
+            trans.x_mask_gate_num_codes = args.x_mask_gate_num_codes
+            trans.x_mask_mode = args.x_mask_mode
+            trans.x_mask_tau = args.x_mask_tau
+            trans.x_mask_track_err = track_x_mask_err
+            trans.x_mask_key_ratio = args.x_mask_key_ratio
+            trans.x_mask_key_k = args.x_mask_key_k
+            if "switch_top2" in args.x_mask_mode and args.trainable_gate:
+                if hasattr(trans, "x_mask_gate_logits"):
+                    trans.x_mask_gate_logits.data.fill_(2)
+
         if args.soft_x_perm:
             predictor_params = []
             for name, trans in (
@@ -1279,17 +1326,6 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 ("mlp.down_trans", layer.mlp.down_trans),
             ):
                 trans.use_x_perm = args.use_x_perm
-                trans.use_x_mask = args.use_x_mask if args.nm_zero_weight==0 else False
-                if trans.use_x_mask:
-                    trans.x_mask_gate_num_codes = args.x_mask_gate_num_codes
-                    trans.x_mask_mode = args.x_mask_mode
-                    trans.x_mask_tau = args.x_mask_tau
-                    trans.x_mask_track_err = track_x_mask_err
-                    trans.x_mask_key_ratio = args.x_mask_key_ratio
-                    trans.x_mask_key_k = args.x_mask_key_k
-                    if "switch_top2" in args.x_mask_mode and args.trainable_gate:
-                        if hasattr(trans, "x_mask_gate_logits"):
-                            trans.x_mask_gate_logits.data.fill_(0)
                 trans.use_x_perm_predictor = args.use_x_perm_predictor
                 if trans.use_x_perm_predictor and trans.x_perm_predictor is None:
                     num_blocks = trans.hidden_dim // trans.block_size
@@ -1334,9 +1370,34 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         if args.lac:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["clip_factor_a", ]), "lr": layer_lr * 10})
             paras_name.append("clip_factor_a")
-        if args.use_x_mask and "switch_top2" in args.x_mask_mode and args.trainable_gate:
+        if getattr(args, "use_x_mask", False) and "switch_top2" in str(getattr(args, "x_mask_mode", "")) and getattr(args, "trainable_gate", False):
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.x_mask_gate", ]), "lr": layer_lr * 10})
             paras_name.append("trans.x_mask_gate")
+        if getattr(args, "use_x_mask", False) and "switch_top2" in str(getattr(args, "x_mask_mode", "")) and getattr(args, "trainable_token_gate", False):
+            token_gate_enabled = False
+            for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
+                if trans is None:
+                    continue
+                if getattr(trans, "x_mask_token_gate_enabled", False):
+                    token_gate_enabled = True
+                    break
+            if token_gate_enabled:
+                lr_mult = float(getattr(args, "x_mask_token_lr_mult", 1.0))
+                trained_params.append(
+                    {"params": get_n_set_parameters_byname(layer, ["trans.x_mask_token_mlp", ]), "lr": layer_lr * lr_mult}
+                )
+                paras_name.append("trans.x_mask_token_mlp")
+                if getattr(args, "x_mask_token_use_layer_scale", True):
+                    trained_params.append(
+                        {"params": get_n_set_parameters_byname(layer, ["trans.x_mask_token_scale", ]), "lr": layer_lr * lr_mult}
+                    )
+                    paras_name.append("trans.x_mask_token_scale")
+        if getattr(args, "trainable_x_mask_fixed_strength", False):
+            lr_mult = float(getattr(args, "x_mask_fixed_strength_lr_mult", 1.0))
+            trained_params.append(
+                {"params": get_n_set_parameters_byname(layer, ["x_mask_fixed_strength", ]), "lr": layer_lr * lr_mult}
+            )
+            paras_name.append("x_mask_fixed_strength")
 
         steps_per_epoch = max(1, args.nsamples // args.cali_bsz)
         total_steps = max(1, args.epochs * steps_per_epoch)
@@ -1631,6 +1692,18 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                     gate_entropy = ent if gate_entropy is None else gate_entropy + ent
                             if gate_entropy is not None:
                                 loss = loss + args.x_mask_gate_entropy * gate_entropy
+                        if getattr(args, "x_mask_token_delta_l2", 0.0) > 0:
+                            delta_l2 = None
+                            for name, trans in (
+                                ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                                ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                                ("mlp.down_trans", layer.mlp.down_trans),
+                            ):
+                                d = getattr(trans, "_last_x_mask_gate_delta_l2", None)
+                                if d is not None:
+                                    delta_l2 = d if delta_l2 is None else delta_l2 + d
+                            if delta_l2 is not None:
+                                loss = loss + float(args.x_mask_token_delta_l2) * delta_l2
                         if args.soft_x_perm and args.soft_perm_reg > 0:
                             x_perm_reg = 0.0
                             for name, trans in (
@@ -1678,6 +1751,36 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     break
                 cur_lr = optimizer.state_dict()['param_groups'][0]['lr']
                 logger.info(f"layer {i} lwc lac iter {epoch}, lr {cur_lr:.8f}  time {time.time() - start_tick:.6f}s, mse: {mse:.8f}" )
+                if (
+                    getattr(args, "use_x_mask", False)
+                    and "switch_top2" in str(getattr(args, "x_mask_mode", ""))
+                    and (getattr(args, "trainable_gate", False) or getattr(args, "trainable_token_gate", False))
+                ):
+                    stats_parts = []
+                    for name, trans in (
+                        ("self_attn.ln_trans", layer.self_attn.ln_trans),
+                        ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
+                        ("mlp.down_trans", layer.mlp.down_trans),
+                    ):
+                        if trans is None or not getattr(trans, "use_x_mask", False):
+                            continue
+                        mean = getattr(trans, "_last_x_mask_gate_mean", None)
+                        if mean is None:
+                            continue
+                        std = getattr(trans, "_last_x_mask_gate_std", None)
+                        frac_low = getattr(trans, "_last_x_mask_gate_frac_low", None)
+                        frac_high = getattr(trans, "_last_x_mask_gate_frac_high", None)
+                        tok_var = getattr(trans, "_last_x_mask_gate_tok_var", None)
+                        delta_l2 = getattr(trans, "_last_x_mask_gate_delta_l2", None)
+                        stats_parts.append(
+                            f"{name}: mean={float(mean):.3f} std={float(std) if std is not None else float('nan'):.3f} "
+                            f"low={float(frac_low) if frac_low is not None else float('nan'):.3f} "
+                            f"high={float(frac_high) if frac_high is not None else float('nan'):.3f} "
+                            f"tok_var={float(tok_var) if tok_var is not None else float('nan'):.3e} "
+                            f"delta_l2={float(delta_l2) if delta_l2 is not None else float('nan'):.3e}"
+                        )
+                    if stats_parts:
+                        logger.info("x_mask_gate_stats: " + " | ".join(stats_parts))
 
             if nan_in_grad and not nan_retried:
                 nan_retried = True

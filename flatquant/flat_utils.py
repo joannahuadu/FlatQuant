@@ -36,6 +36,71 @@ def reparameterize_ln(ln, trans):
     trans.use_diag = False
 
 
+def configure_x_mask_token_gate(
+    model,
+    *,
+    use_x_mask: bool = False,
+    x_mask_mode: str = "hard_fixed",
+    x_mask_token_gate_mode: str = "static_all",
+    x_mask_token_gate_deep_ratio: float = 0.5,
+    x_mask_token_gate_deep_start: int = -1,
+    x_mask_token_mlp_hidden: int = 0,
+    x_mask_token_mlp_chunk_size: int = 1024,
+    x_mask_token_mlp_shared: bool = True,
+    x_mask_token_use_layer_scale: bool = True,
+):
+    num_layers = int(getattr(model.config, "num_hidden_layers", 0))
+    if (
+        not use_x_mask
+        or "switch_top2" not in str(x_mask_mode)
+        or x_mask_token_gate_mode == "static_all"
+        or num_layers <= 0
+    ):
+        enabled_layers = set()
+    elif x_mask_token_gate_mode == "token_all":
+        enabled_layers = set(range(num_layers))
+    elif x_mask_token_gate_mode == "token_deep":
+        if x_mask_token_gate_deep_start is not None and int(x_mask_token_gate_deep_start) >= 0:
+            start = int(x_mask_token_gate_deep_start)
+        else:
+            start = int(num_layers * float(x_mask_token_gate_deep_ratio))
+        start = max(0, min(start, num_layers))
+        enabled_layers = set(range(start, num_layers))
+    else:
+        raise ValueError(f"Unknown x_mask_token_gate_mode: {x_mask_token_gate_mode}")
+
+    shared_mlp = None
+    for idx in range(num_layers):
+        layer = model.model.layers[idx]
+        for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
+            if trans is None or not hasattr(trans, "x_mask_token_gate_enabled"):
+                continue
+            enable = idx in enabled_layers
+            trans.x_mask_token_gate_enabled = enable
+            trans.x_mask_token_mlp_hidden = int(x_mask_token_mlp_hidden)
+            trans.x_mask_token_mlp_chunk_size = int(x_mask_token_mlp_chunk_size)
+            trans.x_mask_token_use_layer_scale = bool(x_mask_token_use_layer_scale)
+            if hasattr(trans, "x_mask_token_scale") and trans.x_mask_token_scale is not None:
+                trans.x_mask_token_scale.requires_grad_(False)
+                if not x_mask_token_use_layer_scale:
+                    with torch.no_grad():
+                        trans.x_mask_token_scale.data.fill_(1.0)
+            if not enable:
+                continue
+            if x_mask_token_mlp_shared:
+                if shared_mlp is None:
+                    if hasattr(trans, "_ensure_x_mask_token_mlp"):
+                        shared_mlp = trans._ensure_x_mask_token_mlp()
+                    else:
+                        continue
+                trans.x_mask_token_mlp = shared_mlp
+                if hasattr(shared_mlp, "chunk_size"):
+                    shared_mlp.chunk_size = int(x_mask_token_mlp_chunk_size)
+            else:
+                if hasattr(trans, "_ensure_x_mask_token_mlp"):
+                    trans._ensure_x_mask_token_mlp()
+
+
 def reparameterize_model(
     model,
     use_x_perm=False,
@@ -54,7 +119,26 @@ def reparameterize_model(
     use_x_perm_predictor=False,
     x_perm_num_clusters=4,
     x_perm_pred_hidden=128,
+    x_mask_token_gate_mode="static_all",
+    x_mask_token_gate_deep_ratio=0.5,
+    x_mask_token_gate_deep_start=-1,
+    x_mask_token_mlp_hidden=0,
+    x_mask_token_mlp_chunk_size=1024,
+    x_mask_token_mlp_shared=True,
+    x_mask_token_use_layer_scale=True,
 ):
+    configure_x_mask_token_gate(
+        model,
+        use_x_mask=use_x_mask,
+        x_mask_mode=x_mask_mode,
+        x_mask_token_gate_mode=x_mask_token_gate_mode,
+        x_mask_token_gate_deep_ratio=x_mask_token_gate_deep_ratio,
+        x_mask_token_gate_deep_start=x_mask_token_gate_deep_start,
+        x_mask_token_mlp_hidden=x_mask_token_mlp_hidden,
+        x_mask_token_mlp_chunk_size=x_mask_token_mlp_chunk_size,
+        x_mask_token_mlp_shared=x_mask_token_mlp_shared,
+        x_mask_token_use_layer_scale=x_mask_token_use_layer_scale,
+    )
     for idx in range(model.config.num_hidden_layers):
         layer = model.model.layers[idx]
         if layer.self_attn.ln_trans is not None:
@@ -173,11 +257,13 @@ def save_flat_matrices(args, model, rank=None):
             "trans.perm_logits",
             "trans.x_perm_logits",
             "trans.x_mask_gate",
+            "trans.x_mask_token",
             "trans.x_mask_comp",
             "trans.x_mask_fixed_pattern",
             "trans.x_mask_fixed_A",
             "trans.x_mask_fixed_A_all",
             "trans.x_mask_fixed_R_all",
+            "x_mask_fixed_strength",
             "clip_factor_w",
             "clip_factor_a",
         ]
