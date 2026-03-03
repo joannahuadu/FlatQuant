@@ -619,8 +619,6 @@ def cali_x_mask_fixed_per(args, model, dataloader, dev, logger):
             getattr(getattr(layer, "mlp", None), "up_gate_trans", None),
             getattr(getattr(layer, "mlp", None), "down_trans", None),
         ):
-            if trans is None:
-                continue
             trans.use_x_mask = False
 
     num_hooked = 0
