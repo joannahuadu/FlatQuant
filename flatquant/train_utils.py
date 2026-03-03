@@ -12,6 +12,7 @@ import transformers
 from flatquant.function_utils import set_require_grad_all, get_n_set_parameters_byname, get_paras_dict_by_name, check_params_grad
 from flatquant.quant_utils import set_quantizer_state
 from flatquant.flat_utils import kronecker_matmul
+from flatquant.trans_utils import apply_x_mask_online
 
 def _get_right_matrix(trans):
     if hasattr(trans, "matrix_right"):
@@ -160,10 +161,39 @@ def _compute_group_hessian(weights, hidden_dim):
             continue
         if W.shape[1] != hidden_dim:
             continue
-        Wg = W.float().view(W.shape[0], num_groups, 4)
+        Wg = W.float().reshape(W.shape[0], num_groups, 4)
         Hg = torch.einsum("ogk,ogh->gkh", Wg, Wg)
         H = Hg if H is None else H + Hg
     return H
+
+
+def _compute_ar_all(H, lam_eps, lam_min=1e-6):
+    if H is None or H.numel() == 0:
+        return None, None
+    device = H.device
+    patterns = torch.tensor([[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]], device=device, dtype=torch.long)
+    drop_patterns = torch.tensor([[2, 3], [1, 3], [1, 2], [0, 3], [0, 2], [0, 1]], device=device, dtype=torch.long)
+    Hf = H.float()
+    Hf = 0.5 * (Hf + Hf.transpose(-1, -2))
+    trace = Hf.diagonal(dim1=-2, dim2=-1).sum(dim=-1)  # [G]
+    lam = lam_eps * (trace / 4.0 + 1e-12)
+    lam = lam.clamp_min(lam_min)
+    I2 = torch.eye(2, device=device, dtype=torch.float32).unsqueeze(0)
+    num_groups = Hf.shape[0]
+    A_all = torch.empty((num_groups, 6, 2, 2), device=device, dtype=torch.float32)
+    R_all = torch.empty((num_groups, 6, 2, 2), device=device, dtype=torch.float32)
+    for pid in range(6):
+        keep = patterns[pid]
+        drop = drop_patterns[pid]
+        Hkk = Hf[:, keep][:, :, keep]
+        Hkp = Hf[:, keep][:, :, drop]
+        Hpk = Hf[:, drop][:, :, keep]
+        Hpp = Hf[:, drop][:, :, drop]
+        A = torch.linalg.solve(Hkk + lam[:, None, None] * I2, Hkp)
+        R = Hpp - Hpk @ A
+        A_all[:, pid] = A
+        R_all[:, pid] = R
+    return A_all, R_all
 
 
 def _compute_fixed_patterns(H, sum_x, sum_xx, count, lam_eps, lam_min=1e-6):
@@ -332,6 +362,23 @@ def cali_sparse(args, model, dataloader, dev, logger):
                     trans.x_mask_track_err = track_x_mask_err
                     trans.x_mask_key_ratio = args.x_mask_key_ratio
                     trans.x_mask_key_k = args.x_mask_key_k
+                    # Reset stats in case they were updated in the fp_outs pre-pass.
+                    trans._x_mask_err_sum = None
+                    trans._x_mask_err_count = 0
+                    trans._x_mask_err_avg = None
+                    trans._x_mask_tok_mse_sum = None
+                    trans._x_mask_tok_mse_sq_sum = None
+                    trans._x_mask_tok_ratio_sum = None
+                    trans._x_mask_tok_ratio_sq_sum = None
+                    trans._x_mask_tok_count = 0
+                    trans._x_mask_tok_mse_mean = None
+                    trans._x_mask_tok_mse_var = None
+                    trans._x_mask_tok_ratio_mean = None
+                    trans._x_mask_tok_ratio_var = None
+                    trans.x_mask_key_idx = None
+                    trans.x_mask_key_mask = None
+                    trans.x_mask_non_key_idx = None
+                    trans.x_mask_non_key_mask = None
             with torch.no_grad():
                 for j in range(args.nsamples // args.cali_bsz):
                     index = j * args.cali_bsz
@@ -346,6 +393,21 @@ def cali_sparse(args, model, dataloader, dev, logger):
                     if err is None:
                         continue
                     entry = {"err_avg": err.detach().cpu()}
+                    tok_cnt = getattr(trans, "_x_mask_tok_count", 0)
+                    if tok_cnt:
+                        entry["token_count"] = int(tok_cnt)
+                    tok_mse_mean = getattr(trans, "_x_mask_tok_mse_mean", None)
+                    if tok_mse_mean is not None:
+                        entry["token_mse_mean"] = tok_mse_mean.detach().cpu()
+                    tok_mse_var = getattr(trans, "_x_mask_tok_mse_var", None)
+                    if tok_mse_var is not None:
+                        entry["token_mse_var"] = tok_mse_var.detach().cpu()
+                    tok_ratio_mean = getattr(trans, "_x_mask_tok_ratio_mean", None)
+                    if tok_ratio_mean is not None:
+                        entry["token_drop_ratio_mean"] = tok_ratio_mean.detach().cpu()
+                    tok_ratio_var = getattr(trans, "_x_mask_tok_ratio_var", None)
+                    if tok_ratio_var is not None:
+                        entry["token_drop_ratio_var"] = tok_ratio_var.detach().cpu()
                     key_idx = getattr(trans, "x_mask_key_idx", None)
                     if key_idx is not None:
                         entry["key_idx"] = key_idx.detach().cpu()
@@ -484,7 +546,138 @@ def cali_sparse(args, model, dataloader, dev, logger):
     return model
 
 
+def _proj_x_mask_online_pre_hook(module, inputs):
+    if getattr(module, "training", False):
+        return None
+    if not getattr(module, "use_x_mask_fixed", False):
+        return None
+    A_all = getattr(module, "x_mask_fixed_A_all", None)
+    R_all = getattr(module, "x_mask_fixed_R_all", None)
+    if A_all is None or R_all is None:
+        return None
+    if A_all.numel() == 0 or R_all.numel() == 0:
+        return None
+    if inputs is None or len(inputs) == 0:
+        return None
+    x = inputs[0]
+    if not torch.is_tensor(x) or x.numel() == 0:
+        return None
+    if x.shape[-1] % 4 != 0:
+        return None
+    alpha = float(getattr(module, "x_mask_alpha", 1.0))
+    if alpha <= 0.0:
+        return None
+    reshaped = x.reshape(*x.shape[:-1], -1, 4)
+    out = apply_x_mask_online(reshaped, A_all.to(x), R_all.to(x))
+    if alpha < 1.0:
+        out = (1.0 - alpha) * reshaped + alpha * out
+    return (out.reshape_as(x),) + inputs[1:]
+
+
+def _install_proj_x_mask_online_hook(proj):
+    handle = getattr(proj, "_x_mask_fixed_pre_hook_handle", None)
+    if handle is not None:
+        try:
+            handle.remove()
+        except Exception:
+            pass
+    proj._x_mask_fixed_pre_hook_handle = proj.register_forward_pre_hook(_proj_x_mask_online_pre_hook)
+
+
+def _set_proj_x_mask_fixed_ar(proj, A_all, R_all):
+    if hasattr(proj, "x_mask_fixed_A_all") and proj.x_mask_fixed_A_all is not None:
+        proj.x_mask_fixed_A_all.data.copy_(
+            A_all.to(proj.x_mask_fixed_A_all.device, dtype=proj.x_mask_fixed_A_all.dtype)
+        )
+    else:
+        proj.x_mask_fixed_A_all = nn.Parameter(A_all.detach(), requires_grad=False)
+
+    if hasattr(proj, "x_mask_fixed_R_all") and proj.x_mask_fixed_R_all is not None:
+        proj.x_mask_fixed_R_all.data.copy_(
+            R_all.to(proj.x_mask_fixed_R_all.device, dtype=proj.x_mask_fixed_R_all.dtype)
+        )
+    else:
+        proj.x_mask_fixed_R_all = nn.Parameter(R_all.detach(), requires_grad=False)
+
+    proj.use_x_mask_fixed = True
+    if not hasattr(proj, "x_mask_alpha"):
+        proj.x_mask_alpha = 1.0
+
+
+def cali_x_mask_fixed_per(args, model, dataloader, dev, logger):
+    if not getattr(args, "use_x_mask_fixed", False):
+        return model
+
+    lam_eps = float(getattr(args, "x_mask_fixed_lam_eps", 1e-3))
+    if getattr(args, "x_mask_mode", None) not in (None, "online_top2"):
+        logger.warning(f"x_mask_fixed_per: proj hook uses online_top2; got x_mask_mode={args.x_mask_mode}")
+
+    # Disable trans-side masking to avoid double-masking; proj hooks apply the compensation.
+    for layer in model.model.layers:
+        for trans in (
+            getattr(getattr(layer, "self_attn", None), "ln_trans", None),
+            getattr(getattr(layer, "mlp", None), "up_gate_trans", None),
+            getattr(getattr(layer, "mlp", None), "down_trans", None),
+        ):
+            if trans is None:
+                continue
+            trans.use_x_mask = False
+
+    num_hooked = 0
+    for i, layer in enumerate(model.model.layers):
+        attn = getattr(layer, "self_attn", None)
+        if attn is not None and getattr(attn, "ln_trans", None) is not None:
+            for pname in ("q_proj", "k_proj", "v_proj"):
+                proj = getattr(attn, pname, None)
+                w = _get_linear_weight(proj)
+                if w is None or w.shape[1] % 4 != 0:
+                    continue
+                H = _compute_group_hessian([w], w.shape[1])
+                A_all, R_all = _compute_ar_all(H, lam_eps)
+                if A_all is None or R_all is None:
+                    continue
+                _set_proj_x_mask_fixed_ar(proj, A_all, R_all)
+                _install_proj_x_mask_online_hook(proj)
+                num_hooked += 1
+
+        mlp = getattr(layer, "mlp", None)
+        if mlp is not None and getattr(mlp, "up_gate_trans", None) is not None:
+            for pname in ("up_proj", "gate_proj"):
+                proj = getattr(mlp, pname, None)
+                w = _get_linear_weight(proj)
+                if w is None or w.shape[1] % 4 != 0:
+                    continue
+                H = _compute_group_hessian([w], w.shape[1])
+                A_all, R_all = _compute_ar_all(H, lam_eps)
+                if A_all is None or R_all is None:
+                    continue
+                _set_proj_x_mask_fixed_ar(proj, A_all, R_all)
+                _install_proj_x_mask_online_hook(proj)
+                num_hooked += 1
+
+        if mlp is not None and getattr(mlp, "down_trans", None) is not None:
+            proj = getattr(mlp, "down_proj", None)
+            w = _get_linear_weight(proj)
+            if w is not None and w.shape[1] % 4 == 0:
+                H = _compute_group_hessian([w], w.shape[1])
+                A_all, R_all = _compute_ar_all(H, lam_eps)
+                if A_all is not None and R_all is not None:
+                    _set_proj_x_mask_fixed_ar(proj, A_all, R_all)
+                    _install_proj_x_mask_online_hook(proj)
+                    num_hooked += 1
+
+        if (i + 1) % 8 == 0:
+            logger.info(f"x_mask_fixed_per: calibrated {i + 1}/{len(model.model.layers)} layers")
+
+    logger.info(f"x_mask_fixed_per: installed {num_hooked} proj x_mask_online hooks")
+    return model
+
+
 def cali_x_mask_fixed(args, model, dataloader, dev, logger):
+    return cali_x_mask_fixed_per(args, model, dataloader, dev, logger)
+
+
+def cali_x_mask_fixed_trans(args, model, dataloader, dev, logger):
     if not getattr(args, "use_x_mask_fixed", False):
         return model
 
@@ -1422,9 +1615,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                 if gate_mean is None:
                                     continue
                                 if args.x_mask_gate_target is None:
-                                    cost = gate_mean.mean()
+                                    cost = gate_mean
                                 else:
-                                    cost = ((gate_mean - args.x_mask_gate_target) ** 2).mean()
+                                    cost = ((gate_mean - args.x_mask_gate_target) ** 2)
                                 gate_cost = cost if gate_cost is None else gate_cost + cost
                             if gate_cost is not None:
                                 loss = loss + args.x_mask_gate_cost * gate_cost
