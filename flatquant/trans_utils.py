@@ -13,7 +13,7 @@ _X_MASK_TOP2_DROP = torch.tensor(
     [[2, 3], [1, 3], [1, 2], [0, 3], [0, 2], [0, 1]], dtype=torch.long
 )
 
-def apply_x_mask_online(reshaped, A_all, R_all, hard_mask=None, hard_sel=None):
+def apply_x_mask_online(reshaped, A_all, R_all, hard_mask=None, hard_sel=None, comp_strength=None):
     """Apply online 2:4 masking with 2x2 error compensation.
 
     Args:
@@ -23,6 +23,8 @@ def apply_x_mask_online(reshaped, A_all, R_all, hard_mask=None, hard_sel=None):
         hard_mask: Optional tensor shaped like reshaped to force a particular keep-pattern.
         hard_sel: Optional selector to blend compensated output into the base input.
             Can be shaped [G] (group-level) or [..., G, 1] (token-level).
+        comp_strength: Optional per-group scalar in [0, 1] to scale the compensation term.
+            Common shapes: [G], [G, 1], [1, G, 1], or [B, G, 1].
     """
     if reshaped is None:
         return None
@@ -66,7 +68,17 @@ def apply_x_mask_online(reshaped, A_all, R_all, hard_mask=None, hard_sel=None):
     A_exp = A_all.unsqueeze(0).expand(x.shape[0], -1, -1, -1, -1)
     idx = best.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2, 2)
     A_sel = torch.gather(A_exp, 2, idx).squeeze(2)
-    x_keep = x_keep + torch.einsum("bgij,bgj->bgi", A_sel, x_drop)
+    comp = torch.einsum("bgij,bgj->bgi", A_sel, x_drop)
+    if comp_strength is not None and torch.is_tensor(comp_strength) and comp_strength.numel() > 0:
+        s = comp_strength.to(device=comp.device, dtype=comp.dtype)
+        if s.dim() == 1 and s.numel() == x.shape[1]:
+            s = s.view(1, -1, 1)
+        elif s.dim() == 2 and s.shape == (x.shape[1], 1):
+            s = s.view(1, x.shape[1], 1)
+        elif s.dim() == 3 and s.shape[-1] != 1:
+            s = s[..., :1]
+        comp = comp * s
+    x_keep = x_keep + comp
 
     out = x.new_zeros(x.shape)
     out.scatter_(-1, keep_idx, x_keep)
@@ -93,6 +105,55 @@ def _sinkhorn(logits, n_iters=10):
         log_p = log_p - torch.logsumexp(log_p, dim=-1, keepdim=True)
         log_p = log_p - torch.logsumexp(log_p, dim=-2, keepdim=True)
     return torch.softmax(log_p, dim=-1)
+
+
+class TokenResidualMLP(nn.Module):
+    """Tiny per-token-per-group residual for x_mask gate logits.
+
+    Input: xg [..., G, 4]
+    Output: delta [..., G] (float32)
+    """
+
+    def __init__(self, hidden: int = 0, chunk_size: int = 1024):
+        super().__init__()
+        self.hidden = int(hidden)
+        self.chunk_size = int(chunk_size) if chunk_size is not None else 0
+        in_dim = 8
+        if self.hidden <= 0:
+            self.weight = nn.Parameter(torch.zeros((in_dim,), dtype=torch.float32), requires_grad=True)
+            self.bias = nn.Parameter(torch.zeros((), dtype=torch.float32), requires_grad=True)
+            nn.init.trunc_normal_(self.weight, std=0.02)
+        else:
+            self.fc1 = nn.Linear(in_dim, self.hidden, bias=True, dtype=torch.float32)
+            self.fc2 = nn.Linear(self.hidden, 1, bias=True, dtype=torch.float32)
+            nn.init.trunc_normal_(self.fc1.weight, std=0.02)
+            nn.init.zeros_(self.fc1.bias)
+            nn.init.trunc_normal_(self.fc2.weight, std=0.02)
+            nn.init.zeros_(self.fc2.bias)
+
+    def forward(self, xg: torch.Tensor) -> torch.Tensor:
+        if xg.numel() == 0:
+            return xg.new_zeros(*xg.shape[:-1], dtype=torch.float32)
+        xg_flat = xg.reshape(-1, xg.shape[-2], 4)
+        n, g = xg_flat.shape[0], xg_flat.shape[1]
+        chunk = self.chunk_size if self.chunk_size and self.chunk_size > 0 else n
+        out = xg_flat.new_empty((n, g), dtype=torch.float32)
+        if self.hidden <= 0:
+            w = self.weight
+            w_x = w[:4]
+            w_abs = w[4:]
+            b = self.bias
+            for i in range(0, n, chunk):
+                xc = xg_flat[i : i + chunk].float()
+                out[i : i + chunk] = (xc * w_x).sum(dim=-1) + (xc.abs() * w_abs).sum(dim=-1) + b
+        else:
+            for i in range(0, n, chunk):
+                xc = xg_flat[i : i + chunk].float()
+                feat = torch.cat([xc, xc.abs()], dim=-1)
+                h = self.fc1(feat)
+                h = F.gelu(h)
+                out[i : i + chunk] = self.fc2(h).squeeze(-1)
+        return out.view(*xg.shape[:-1])
 
 
 class _XPermPredictor(nn.Module):
@@ -329,10 +390,29 @@ class SVDDecomposeTransMatrix(nn.Module):
         self.x_mask_fixed_R_all = nn.Parameter(
             torch.zeros((left_size * right_size) // 4, 6, 2, 2, dtype=torch.float32), requires_grad=False
         )
+        # Learnable per-group compensation strength in [0, 1] (sigmoid(logits)).
+        # Shape: [G, 1], where G = hidden_dim // 4.
+        init_strength = 0.95
+        init_logit = float(torch.logit(torch.tensor(init_strength)))
+        self.x_mask_fixed_strength_logits = nn.Parameter(
+            torch.full(((left_size * right_size) // 4, 1), init_logit, dtype=torch.float32),
+            requires_grad=False,
+        )
         self._last_x_mask_ent = None
         self._last_x_mask_l2 = None
         self._last_x_mask_gate_mean = None
         self._last_x_mask_gate_entropy = None
+        self._last_x_mask_gate_std = None
+        self._last_x_mask_gate_frac_low = None
+        self._last_x_mask_gate_frac_high = None
+        self._last_x_mask_gate_tok_var = None
+        self._last_x_mask_gate_delta_l2 = None
+        self.x_mask_token_gate_enabled = False
+        self.x_mask_token_mlp = None
+        self.x_mask_token_mlp_hidden = 0
+        self.x_mask_token_mlp_chunk_size = 1024
+        self.x_mask_token_use_layer_scale = True
+        self.x_mask_token_scale = nn.Parameter(torch.ones((), dtype=torch.float32), requires_grad=False)
         self._last_p_soft = None
         self._last_perm_right = None
         self._last_x_p_soft = None
@@ -368,6 +448,63 @@ class SVDDecomposeTransMatrix(nn.Module):
             else:
                 self.diag_scale = torch.nn.Parameter(diag_init_para, requires_grad=True)
         self._eval_mode = False
+
+    def _ensure_x_mask_token_mlp(self):
+        if self.x_mask_token_mlp is not None:
+            if hasattr(self.x_mask_token_mlp, "chunk_size"):
+                self.x_mask_token_mlp.chunk_size = int(self.x_mask_token_mlp_chunk_size)
+            return self.x_mask_token_mlp
+        hidden = int(getattr(self, "x_mask_token_mlp_hidden", 0))
+        chunk = int(getattr(self, "x_mask_token_mlp_chunk_size", 1024))
+        self.x_mask_token_mlp = TokenResidualMLP(hidden=hidden, chunk_size=chunk)
+        return self.x_mask_token_mlp
+
+    def _compute_x_mask_token_delta(self, reshaped: torch.Tensor) -> torch.Tensor:
+        if not getattr(self, "x_mask_token_gate_enabled", False):
+            return None
+        mlp = getattr(self, "x_mask_token_mlp", None)
+        if mlp is None:
+            mlp = self._ensure_x_mask_token_mlp()
+        delta = mlp(reshaped)
+        scale = getattr(self, "x_mask_token_scale", None)
+        if scale is not None:
+            delta = delta * scale.to(delta)
+        self._last_x_mask_gate_delta_l2 = delta.pow(2).mean()
+        return delta
+
+    def _compute_x_mask_gate_r(self, logits: torch.Tensor, reshaped: torch.Tensor):
+        delta = self._compute_x_mask_token_delta(reshaped)
+        if delta is None:
+            r = torch.sigmoid(logits)
+            return r, r.float()
+        logits_fp32 = logits.float() + delta
+        r_fp32 = torch.sigmoid(logits_fp32)
+        return r_fp32.to(dtype=logits.dtype), r_fp32
+
+    def _update_x_mask_gate_stats(self, r_fp32: torch.Tensor):
+        if r_fp32 is None:
+            return
+        if r_fp32.numel() == 0:
+            self._last_x_mask_gate_mean = None
+            self._last_x_mask_gate_std = None
+            self._last_x_mask_gate_frac_low = None
+            self._last_x_mask_gate_frac_high = None
+            self._last_x_mask_gate_tok_var = None
+            self._last_x_mask_gate_entropy = None
+            return
+        self._last_x_mask_gate_mean = r_fp32.mean()
+        self._last_x_mask_gate_std = r_fp32.std(unbiased=False)
+        self._last_x_mask_gate_frac_low = (r_fp32 < 0.05).float().mean()
+        self._last_x_mask_gate_frac_high = (r_fp32 > 0.95).float().mean()
+        # Var_t(g_{t,g}) averaged over groups.
+        r_flat = r_fp32.reshape(-1, r_fp32.shape[-1])
+        mean_g = r_flat.mean(dim=0)
+        var_g = r_flat.pow(2).mean(dim=0) - mean_g.pow(2)
+        self._last_x_mask_gate_tok_var = var_g.clamp_min(0.0).mean()
+        r_clamped = r_fp32.clamp(min=1e-6, max=1.0 - 1e-6)
+        self._last_x_mask_gate_entropy = (
+            -(r_clamped * torch.log(r_clamped) + (1.0 - r_clamped) * torch.log(1.0 - r_clamped)).mean()
+        )
 
     def forward(self, inp, inv_t=False):
         if self.add_diag and self.use_diag:
@@ -496,7 +633,14 @@ class SVDDecomposeTransMatrix(nn.Module):
         x_keep = torch.gather(x, -1, keep_exp)
         x_drop = torch.gather(x, -1, drop_exp)
         A = self.x_mask_fixed_A.to(x)
-        x_keep = x_keep + torch.einsum("gij,bgj->bgi", A, x_drop)
+        comp = torch.einsum("gij,bgj->bgi", A, x_drop)
+        strength_logits = getattr(self, "x_mask_fixed_strength_logits", None)
+        if strength_logits is not None and strength_logits.numel() > 0:
+            s = torch.sigmoid(strength_logits).to(device=comp.device, dtype=comp.dtype)
+            if s.dim() == 2 and s.shape == (x.shape[1], 1):
+                s = s.view(1, x.shape[1], 1)
+            comp = comp * s
+        x_keep = x_keep + comp
         out = x.new_zeros(x.shape)
         out.scatter_(-1, keep_exp, x_keep)
         return out.view_as(reshaped)
@@ -511,13 +655,29 @@ class SVDDecomposeTransMatrix(nn.Module):
         x = reshaped.view(-1, reshaped.shape[-2], 4)
         A_all = self.x_mask_fixed_A_all.to(x)
         R_all = self.x_mask_fixed_R_all.to(x)
-        return apply_x_mask_online(reshaped, A_all, R_all, hard_mask=hard_mask, hard_sel=hard_sel)
+        strength_logits = getattr(self, "x_mask_fixed_strength_logits", None)
+        strength = None
+        if strength_logits is not None and strength_logits.numel() > 0:
+            strength = torch.sigmoid(strength_logits).to(device=x.device, dtype=x.dtype)
+        return apply_x_mask_online(
+            reshaped,
+            A_all,
+            R_all,
+            hard_mask=hard_mask,
+            hard_sel=hard_sel,
+            comp_strength=strength,
+        )
 
     def _apply_x_mask(self, tensor):
         self._last_x_mask_ent = None
         self._last_x_mask_l2 = None
         self._last_x_mask_gate_mean = None
         self._last_x_mask_gate_entropy = None
+        self._last_x_mask_gate_std = None
+        self._last_x_mask_gate_frac_low = None
+        self._last_x_mask_gate_frac_high = None
+        self._last_x_mask_gate_tok_var = None
+        self._last_x_mask_gate_delta_l2 = None
         alpha = float(getattr(self, "x_mask_alpha", 1.0))
         if alpha <= 0.0:
             return tensor
@@ -556,12 +716,8 @@ class SVDDecomposeTransMatrix(nn.Module):
             x_sp = reshaped * gate_raw
             self._update_x_mask_err(reshaped, x_sp)
             logits = self._compute_x_mask_gate_logits(tensor)
-            r = torch.sigmoid(logits)
-            self._last_x_mask_gate_mean = r.mean()
-            r_clamped = r.clamp(min=1e-6, max=1.0 - 1e-6)
-            self._last_x_mask_gate_entropy = (
-                -(r_clamped * torch.log(r_clamped) + (1.0 - r_clamped) * torch.log(1.0 - r_clamped)).mean()
-            )
+            r, r_fp32 = self._compute_x_mask_gate_r(logits, reshaped)
+            self._update_x_mask_gate_stats(r_fp32)
             r = r.unsqueeze(-1)
             mixed = r * reshaped + (1.0 - r) * x_sp
             r_thr = self.x_mask_r_thr
@@ -612,12 +768,10 @@ class SVDDecomposeTransMatrix(nn.Module):
                 if self.x_mask_track_err:
                     r = torch.ones_like(logits)
                 else:
-                    r = torch.sigmoid(logits)
-            self._last_x_mask_gate_mean = r.mean()
-            r_clamped = r.clamp(min=1e-6, max=1.0 - 1e-6)
-            self._last_x_mask_gate_entropy = (
-                -(r_clamped * torch.log(r_clamped) + (1.0 - r_clamped) * torch.log(1.0 - r_clamped)).mean()
-            )
+                    r, r_fp32 = self._compute_x_mask_gate_r(logits, reshaped)
+                    self._update_x_mask_gate_stats(r_fp32)
+            if r is not None and self._last_x_mask_gate_mean is None:
+                self._update_x_mask_gate_stats(r.float())
             r = r.unsqueeze(-1)
             mixed = r * reshaped + (1.0 - r) * x_sp
             r_thr = self.x_mask_r_thr
@@ -667,12 +821,8 @@ class SVDDecomposeTransMatrix(nn.Module):
             x_sp = reshaped * gate_raw
             self._update_x_mask_err(reshaped, x_sp)
             logits = self._compute_x_mask_gate_logits(tensor)
-            r = torch.sigmoid(logits)
-            self._last_x_mask_gate_mean = r.mean()
-            r_clamped = r.clamp(min=1e-6, max=1.0 - 1e-6)
-            self._last_x_mask_gate_entropy = (
-                -(r_clamped * torch.log(r_clamped) + (1.0 - r_clamped) * torch.log(1.0 - r_clamped)).mean()
-            )
+            r, r_fp32 = self._compute_x_mask_gate_r(logits, reshaped)
+            self._update_x_mask_gate_stats(r_fp32)
             if not self._eval_mode:
                 r_hard = (r > 0.5).to(r)
                 r = r_hard - r.detach() + r

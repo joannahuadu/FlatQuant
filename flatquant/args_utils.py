@@ -169,6 +169,29 @@ def parser_gen():
                         help="Hidden size for low-rank x_mask gate router (x_t -> dim -> N).")
     parser.add_argument("--trainable_gate", action="store_true", default=False,
                         help="if training x mask gate")
+    parser.add_argument("--x_mask_token_gate_mode", type=str, default="static_all",
+                        choices=["static_all", "token_deep", "token_all"],
+                        help="Gate mode for switch_top2: static_all uses shared per-layer gate; "
+                             "token_deep adds token residual gate for deep layers; "
+                             "token_all adds token residual gate for all layers.")
+    parser.add_argument("--x_mask_token_gate_deep_ratio", type=float, default=0.5,
+                        help="If token_deep, enable token residual gate for layers >= int(num_layers * ratio).")
+    parser.add_argument("--x_mask_token_gate_deep_start", type=int, default=-1,
+                        help="If >=0, override deep start layer index for token_deep.")
+    parser.add_argument("--x_mask_token_mlp_hidden", type=int, default=0,
+                        help="Hidden size for token residual MLP (0 = linear 8->1).")
+    parser.add_argument("--x_mask_token_mlp_chunk_size", type=int, default=1024,
+                        help="Chunk size (tokens) for token residual MLP forward to limit memory.")
+    parser.add_argument("--x_mask_token_mlp_shared", action=argparse.BooleanOptionalAction, default=True,
+                        help="Share one token residual MLP across all enabled trans modules.")
+    parser.add_argument("--x_mask_token_use_layer_scale", action=argparse.BooleanOptionalAction, default=True,
+                        help="Learn a per-trans scalar to scale the token residual delta.")
+    parser.add_argument("--x_mask_token_delta_l2", type=float, default=0.0,
+                        help="Weight for L2 regularization on token residual delta.")
+    parser.add_argument("--x_mask_token_lr_mult", type=float, default=1.0,
+                        help="LR multiplier for token residual gate params when training.")
+    parser.add_argument("--trainable_token_gate", action="store_true", default=False,
+                        help="Train token residual gate (MLP and optional scale).")
     parser.add_argument("--use_x_mask_comp", action="store_true", default=False,
                         help="Apply per-group compensation scalar for r < thr sparse path "
                              "(requires trans.x_mask_comp to be set).")
@@ -176,6 +199,10 @@ def parser_gen():
                         help="Use fixed 2:4 patterns with 2x2 compensation (requires calibration).")
     parser.add_argument("--x_mask_fixed_lam_eps", type=float, default=1e-3,
                         help="Damping scale for fixed 2:4 compensation (lambda = eps * trace(H)/4).")
+    parser.add_argument("--trainable_x_mask_fixed_strength", action="store_true", default=False,
+                        help="Train per-group compensation strength for fixed/online 2:4 compensation.")
+    parser.add_argument("--x_mask_fixed_strength_lr_mult", type=float, default=1.0,
+                        help="LR multiplier for x_mask_fixed strength params when training.")
     parser.add_argument("--x_mask_gate_cost", type=float, default=0.0,
                         help="Weight for switch_top2 gate mean target loss (or L1 if target not set).")
     parser.add_argument("--x_mask_gate_target", type=float, default=None,
