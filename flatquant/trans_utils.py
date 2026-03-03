@@ -13,6 +13,79 @@ _X_MASK_TOP2_DROP = torch.tensor(
     [[2, 3], [1, 3], [1, 2], [0, 3], [0, 2], [0, 1]], dtype=torch.long
 )
 
+def apply_x_mask_online(reshaped, A_all, R_all, hard_mask=None, hard_sel=None):
+    """Apply online 2:4 masking with 2x2 error compensation.
+
+    Args:
+        reshaped: Tensor shaped [..., G, 4].
+        A_all: Tensor shaped [G, 6, 2, 2].
+        R_all: Tensor shaped [G, 6, 2, 2]. Only required when hard_mask is None.
+        hard_mask: Optional tensor shaped like reshaped to force a particular keep-pattern.
+        hard_sel: Optional selector to blend compensated output into the base input.
+            Can be shaped [G] (group-level) or [..., G, 1] (token-level).
+    """
+    if reshaped is None:
+        return None
+    if reshaped.numel() == 0:
+        return reshaped
+    if reshaped.shape[-1] != 4:
+        return reshaped
+    if A_all is None or A_all.numel() == 0:
+        return reshaped
+
+    x = reshaped.view(-1, reshaped.shape[-2], 4)
+    patterns = _X_MASK_TOP2_PATTERNS.to(x.device)
+    drops = _X_MASK_TOP2_DROP.to(x.device)
+
+    if hard_mask is None:
+        if R_all is None or R_all.numel() == 0:
+            return reshaped
+        costs = []
+        for pid in range(6):
+            drop = drops[pid]
+            drop_exp = drop.unsqueeze(0).unsqueeze(0).expand(x.shape[0], x.shape[1], -1)
+            x_drop = torch.gather(x, -1, drop_exp)
+            Rm = R_all[:, pid]
+            cost = torch.einsum("bgi,gij,bgj->bg", x_drop, Rm, x_drop)
+            costs.append(cost)
+        cost = torch.stack(costs, dim=-1)
+        best = torch.argmin(cost, dim=-1)
+    else:
+        hm = hard_mask.view(-1, hard_mask.shape[-2], 4).to(device=x.device, dtype=x.dtype)
+        keep_idx = torch.topk(hm, 2, dim=-1).indices
+        keep_idx, _ = torch.sort(keep_idx, dim=-1)
+        pat = patterns.view(1, 1, -1, 2)
+        match = (keep_idx.unsqueeze(-2) == pat).all(-1)
+        best = torch.argmax(match.to(torch.int64), dim=-1)
+
+    keep_idx = patterns[best]
+    drop_idx = drops[best]
+    x_keep = torch.gather(x, -1, keep_idx)
+    x_drop = torch.gather(x, -1, drop_idx)
+
+    A_exp = A_all.unsqueeze(0).expand(x.shape[0], -1, -1, -1, -1)
+    idx = best.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2, 2)
+    A_sel = torch.gather(A_exp, 2, idx).squeeze(2)
+    x_keep = x_keep + torch.einsum("bgij,bgj->bgi", A_sel, x_drop)
+
+    out = x.new_zeros(x.shape)
+    out.scatter_(-1, keep_idx, x_keep)
+    if hard_sel is not None:
+        h = hard_sel.to(device=out.device, dtype=out.dtype)
+        if h.dim() == 1:
+            if h.numel() != x.shape[1]:
+                return out.view_as(reshaped)
+            h = h.view(1, -1, 1).expand(x.shape[0], -1, 1)
+        else:
+            h = h.reshape(-1, h.shape[-2], h.shape[-1])
+            if h.shape[-1] != 1:
+                h = h[..., :1]
+            if h.shape[1] != x.shape[1]:
+                return out.view_as(reshaped)
+        base = x
+        out = base * (1.0 - h) + out * h
+    return out.view_as(reshaped)
+
 # ---------- soft permutation (sinkhorn) ----------
 def _sinkhorn(logits, n_iters=10):
     log_p = logits
@@ -163,7 +236,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         x_perm_pred_hidden=128,
         x_perm_num_buckets=64,
         x_perm_kmeans_iters=5,
-        x_mask_gate_num_codes=64,
+        x_mask_gate_num_codes=1,
         x_mask_gate_router_dim=256,
     ):
         super(SVDDecomposeTransMatrix, self).__init__()
@@ -205,6 +278,15 @@ class SVDDecomposeTransMatrix(nn.Module):
         self._x_mask_err_sum = None
         self._x_mask_err_count = 0
         self._x_mask_err_avg = None
+        self._x_mask_tok_mse_sum = None
+        self._x_mask_tok_mse_sq_sum = None
+        self._x_mask_tok_ratio_sum = None
+        self._x_mask_tok_ratio_sq_sum = None
+        self._x_mask_tok_count = 0
+        self._x_mask_tok_mse_mean = None
+        self._x_mask_tok_mse_var = None
+        self._x_mask_tok_ratio_mean = None
+        self._x_mask_tok_ratio_var = None
         self.x_mask_key_idx = None
         self.x_mask_key_mask = None
         self.x_mask_non_key_mask = None
@@ -214,9 +296,12 @@ class SVDDecomposeTransMatrix(nn.Module):
         if self.x_mask_gate_num_codes < 1:
             self.x_mask_gate_num_codes = 1
         self.x_mask_gate_router_dim = int(x_mask_gate_router_dim) if x_mask_gate_router_dim is not None else 0
-        self.x_mask_gate_logits = nn.Parameter(
-            torch.zeros((self.x_mask_gate_num_codes, num_groups), dtype=torch.float32), requires_grad=True
-        )
+        if self.x_mask_gate_num_codes > 1:
+            self.x_mask_gate_logits = nn.Parameter(
+                torch.zeros((self.x_mask_gate_num_codes, num_groups), dtype=torch.float32), requires_grad=True
+            )
+        else:
+            self.x_mask_gate_logits = nn.Parameter(torch.zeros(num_groups, dtype=torch.float32), requires_grad=True)
         if self.x_mask_gate_num_codes > 1 and self.x_mask_gate_router_dim > 0:
             self.x_mask_gate_router_down = nn.Linear(left_size * right_size, self.x_mask_gate_router_dim, bias=True)
             self.x_mask_gate_router_up = nn.Linear(self.x_mask_gate_router_dim, self.x_mask_gate_num_codes, bias=True)
@@ -425,48 +510,8 @@ class SVDDecomposeTransMatrix(nn.Module):
             return None
         x = reshaped.view(-1, reshaped.shape[-2], 4)
         A_all = self.x_mask_fixed_A_all.to(x)
-        patterns = _X_MASK_TOP2_PATTERNS.to(x.device)
-        drops = _X_MASK_TOP2_DROP.to(x.device)
-
-        if hard_mask is None:
-            R_all = self.x_mask_fixed_R_all.to(x)
-            costs = []
-            for pid in range(6):
-                drop = drops[pid]
-                drop_exp = drop.unsqueeze(0).unsqueeze(0).expand(x.shape[0], x.shape[1], -1)
-                x_drop = torch.gather(x, -1, drop_exp)
-                Rm = R_all[:, pid]
-                cost = torch.einsum("bgi,gij,bgj->bg", x_drop, Rm, x_drop)
-                costs.append(cost)
-            cost = torch.stack(costs, dim=-1)
-            best = torch.argmin(cost, dim=-1)
-        else:
-            hm = hard_mask.view(-1, hard_mask.shape[-2], 4).to(device=x.device, dtype=x.dtype)
-            keep_idx = torch.topk(hm, 2, dim=-1).indices
-            keep_idx, _ = torch.sort(keep_idx, dim=-1)
-            pat = patterns.view(1, 1, -1, 2)
-            match = (keep_idx.unsqueeze(-2) == pat).all(-1)
-            best = torch.argmax(match.to(torch.int64), dim=-1)
-
-        keep_idx = patterns[best]
-        drop_idx = drops[best]
-        x_keep = torch.gather(x, -1, keep_idx)
-        x_drop = torch.gather(x, -1, drop_idx)
-
-        A_exp = A_all.unsqueeze(0).expand(x.shape[0], -1, -1, -1, -1)
-        idx = best.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2, 2)
-        A_sel = torch.gather(A_exp, 2, idx).squeeze(2)
-        x_keep = x_keep + torch.einsum("bgij,bgj->bgi", A_sel, x_drop)
-
-        out = x.new_zeros(x.shape)
-        out.scatter_(-1, keep_idx, x_keep)
-        if hard_sel is not None:
-            h = hard_sel.to(device=out.device, dtype=out.dtype)
-            h = h.view(1, h.shape[0], 1)
-            h = h.expand(x.shape[0], x.shape[1], 1)
-            base = reshaped.view_as(out)
-            out = base * (1.0 - h) + out * h
-        return out.view_as(reshaped)
+        R_all = self.x_mask_fixed_R_all.to(x)
+        return apply_x_mask_online(reshaped, A_all, R_all, hard_mask=hard_mask, hard_sel=hard_sel)
 
     def _apply_x_mask(self, tensor):
         self._last_x_mask_ent = None
@@ -512,7 +557,7 @@ class SVDDecomposeTransMatrix(nn.Module):
             self._update_x_mask_err(reshaped, x_sp)
             logits = self._compute_x_mask_gate_logits(tensor)
             r = torch.sigmoid(logits)
-            self._last_x_mask_gate_mean = r.mean(dim=-1)
+            self._last_x_mask_gate_mean = r.mean()
             r_clamped = r.clamp(min=1e-6, max=1.0 - 1e-6)
             self._last_x_mask_gate_entropy = (
                 -(r_clamped * torch.log(r_clamped) + (1.0 - r_clamped) * torch.log(1.0 - r_clamped)).mean()
@@ -568,7 +613,7 @@ class SVDDecomposeTransMatrix(nn.Module):
                     r = torch.ones_like(logits)
                 else:
                     r = torch.sigmoid(logits)
-            self._last_x_mask_gate_mean = r.mean(dim=-1)
+            self._last_x_mask_gate_mean = r.mean()
             r_clamped = r.clamp(min=1e-6, max=1.0 - 1e-6)
             self._last_x_mask_gate_entropy = (
                 -(r_clamped * torch.log(r_clamped) + (1.0 - r_clamped) * torch.log(1.0 - r_clamped)).mean()
@@ -623,7 +668,7 @@ class SVDDecomposeTransMatrix(nn.Module):
             self._update_x_mask_err(reshaped, x_sp)
             logits = self._compute_x_mask_gate_logits(tensor)
             r = torch.sigmoid(logits)
-            self._last_x_mask_gate_mean = r.mean(dim=-1)
+            self._last_x_mask_gate_mean = r.mean()
             r_clamped = r.clamp(min=1e-6, max=1.0 - 1e-6)
             self._last_x_mask_gate_entropy = (
                 -(r_clamped * torch.log(r_clamped) + (1.0 - r_clamped) * torch.log(1.0 - r_clamped)).mean()
@@ -672,6 +717,8 @@ class SVDDecomposeTransMatrix(nn.Module):
             return
         with torch.no_grad():
             diff = (x_sp - reshaped).float().pow(2)
+
+            # ---- per-group average error (existing behavior) ----
             dims = list(range(diff.dim()))
             # keep group dimension (-2), reduce others
             if len(dims) >= 2:
@@ -683,6 +730,47 @@ class SVDDecomposeTransMatrix(nn.Module):
                 self._x_mask_err_sum = self._x_mask_err_sum + err.detach()
             self._x_mask_err_count += 1
             self._x_mask_err_avg = self._x_mask_err_sum / float(self._x_mask_err_count)
+
+            # ---- token-wise cost stats (per group) ----
+            # Define token cost for group g at token t:
+            #   mse_tg = mean_d (x_sp - x)^2  over the 4 dims.
+            # Also track drop-energy ratio:
+            #   ratio_tg = sum_d (x_sp - x)^2 / (sum_d x^2 + eps)
+            token_mse = diff.mean(dim=-1)  # [..., G]
+            token_mse = token_mse.reshape(-1, token_mse.shape[-1])  # [T, G]
+            sum_mse = token_mse.sum(dim=0)  # [G]
+            sum_mse_sq = token_mse.pow(2).sum(dim=0)  # [G]
+            tok_count = int(token_mse.shape[0])
+
+            x2 = reshaped.float().pow(2).sum(dim=-1)  # [..., G]
+            drop = diff.sum(dim=-1)  # [..., G]
+            ratio = drop / (x2 + 1e-12)
+            ratio = ratio.reshape(-1, ratio.shape[-1])  # [T, G]
+            sum_ratio = ratio.sum(dim=0)
+            sum_ratio_sq = ratio.pow(2).sum(dim=0)
+
+            if self._x_mask_tok_mse_sum is None:
+                self._x_mask_tok_mse_sum = sum_mse.detach()
+                self._x_mask_tok_mse_sq_sum = sum_mse_sq.detach()
+                self._x_mask_tok_ratio_sum = sum_ratio.detach()
+                self._x_mask_tok_ratio_sq_sum = sum_ratio_sq.detach()
+                self._x_mask_tok_count = tok_count
+            else:
+                self._x_mask_tok_mse_sum = self._x_mask_tok_mse_sum + sum_mse.detach()
+                self._x_mask_tok_mse_sq_sum = self._x_mask_tok_mse_sq_sum + sum_mse_sq.detach()
+                self._x_mask_tok_ratio_sum = self._x_mask_tok_ratio_sum + sum_ratio.detach()
+                self._x_mask_tok_ratio_sq_sum = self._x_mask_tok_ratio_sq_sum + sum_ratio_sq.detach()
+                self._x_mask_tok_count += tok_count
+
+            denom = float(max(1, int(self._x_mask_tok_count)))
+            mse_mean = self._x_mask_tok_mse_sum / denom
+            mse_var = self._x_mask_tok_mse_sq_sum / denom - mse_mean.pow(2)
+            ratio_mean = self._x_mask_tok_ratio_sum / denom
+            ratio_var = self._x_mask_tok_ratio_sq_sum / denom - ratio_mean.pow(2)
+            self._x_mask_tok_mse_mean = mse_mean
+            self._x_mask_tok_mse_var = mse_var.clamp_min(0.0)
+            self._x_mask_tok_ratio_mean = ratio_mean
+            self._x_mask_tok_ratio_var = ratio_var.clamp_min(0.0)
             k = None
             if self.x_mask_key_k is not None:
                 k = int(self.x_mask_key_k)

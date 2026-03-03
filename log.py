@@ -81,9 +81,9 @@ def _log_xq_stats(
             else:
                 os.makedirs(out_dir, exist_ok=True)
                 flat = x_q.detach().float().view(-1)
-                if flat.numel() > max_points:
-                    idx = torch.randint(0, flat.numel(), (max_points,), device=flat.device)
-                    flat = flat[idx]
+                # if flat.numel() > max_points:
+                #     idx = torch.randint(0, flat.numel(), (max_points,), device=flat.device)
+                #     flat = flat[idx]
                 data = flat.cpu().numpy()
                 mean = float(data.mean())
                 std = float(data.std())
