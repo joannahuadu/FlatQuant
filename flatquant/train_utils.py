@@ -1316,7 +1316,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             trans.x_mask_key_k = args.x_mask_key_k
             if "switch_top2" in args.x_mask_mode and args.trainable_gate:
                 if hasattr(trans, "x_mask_gate_logits"):
-                    trans.x_mask_gate_logits.data.fill_(2)
+                    trans.x_mask_gate_logits.data.fill_(0)
 
         if args.soft_x_perm:
             predictor_params = []
@@ -1376,8 +1376,6 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         if getattr(args, "use_x_mask", False) and "switch_top2" in str(getattr(args, "x_mask_mode", "")) and getattr(args, "trainable_token_gate", False):
             token_gate_enabled = False
             for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
-                if trans is None:
-                    continue
                 if getattr(trans, "x_mask_token_gate_enabled", False):
                     token_gate_enabled = True
                     break
@@ -1516,6 +1514,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     _save_stage_ckpt("stage1")
                     for p in perm_logits.values():
                         p.requires_grad_(False)
+                    for p in get_n_set_parameters_byname(layer, ["trans.x_mask_gate", "trans.x_mask_token_mlp", "trans.x_mask_token_scale"]):
+                        p.requires_grad_(False)
+                    args.x_mask_gate_cost = 0.0
                     args.dim2_loss_weight = 0.0
                     optimizer = _prune_frozen_param_groups(optimizer)
                 if args.use_stage3 and args.stage3_start is not None and epoch == args.stage3_start:

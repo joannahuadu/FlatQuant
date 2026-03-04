@@ -60,18 +60,6 @@ def main():
         logger.info("Finished applying FlatQuant to model.")
         if args.act_sparsity:
             configure_act_sparsity(model, args, logger)
-        flat_utils.configure_x_mask_token_gate(
-            model,
-            use_x_mask=args.use_x_mask,
-            x_mask_mode=args.x_mask_mode,
-            x_mask_token_gate_mode=args.x_mask_token_gate_mode,
-            x_mask_token_gate_deep_ratio=args.x_mask_token_gate_deep_ratio,
-            x_mask_token_gate_deep_start=args.x_mask_token_gate_deep_start,
-            x_mask_token_mlp_hidden=args.x_mask_token_mlp_hidden,
-            x_mask_token_mlp_chunk_size=args.x_mask_token_mlp_chunk_size,
-            x_mask_token_mlp_shared=args.x_mask_token_mlp_shared,
-            x_mask_token_use_layer_scale=args.x_mask_token_use_layer_scale,
-        )
         if args.resume:
             flat_utils.load_flat_parameters(args, model, path=args.matrix_path)
         if args.reload_matrix:
