@@ -68,7 +68,7 @@ def apply_x_mask_online(reshaped, A_all, R_all, hard_mask=None, hard_sel=None, c
     A_exp = A_all.unsqueeze(0).expand(x.shape[0], -1, -1, -1, -1)
     idx = best.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2, 2)
     A_sel = torch.gather(A_exp, 2, idx).squeeze(2)
-    comp = torch.einsum("bgij,bgj->bgi", A_sel, x_drop)
+    comp = torch.einsum("bgij,bgj->bgi", A_sel.detach(), x_drop.detach())
     if comp_strength is not None and torch.is_tensor(comp_strength) and comp_strength.numel() > 0:
         s = comp_strength.to(device=comp.device, dtype=comp.dtype)
         if s.dim() == 1 and s.numel() == x.shape[1]:
@@ -466,9 +466,6 @@ class SVDDecomposeTransMatrix(nn.Module):
         if mlp is None:
             mlp = self._ensure_x_mask_token_mlp()
         delta = mlp(reshaped)
-        scale = getattr(self, "x_mask_token_scale", None)
-        if scale is not None:
-            delta = delta * scale.to(delta)
         self._last_x_mask_gate_delta_l2 = delta.pow(2).mean()
         return delta
 
@@ -477,7 +474,12 @@ class SVDDecomposeTransMatrix(nn.Module):
         if delta is None:
             r = torch.sigmoid(logits)
             return r, r.float()
-        logits_fp32 = logits.float() + delta
+        delta = delta - delta.mean(dim=-1, keepdim=True)
+        scale = getattr(self, "x_mask_token_scale", None)
+        delta = torch.tanh(delta)
+        if scale is not None:
+            delta = delta * scale.to(delta)
+        logits_fp32 = logits.float() +  delta
         r_fp32 = torch.sigmoid(logits_fp32)
         return r_fp32.to(dtype=logits.dtype), r_fp32
 
@@ -975,7 +977,7 @@ class SVDDecomposeTransMatrix(nn.Module):
             return tensor.new_zeros(*tensor.shape[:-1], (tensor.shape[-1] // 4))
         if logits.dim() == 1:
             base = logits.to(tensor)
-            return base.view(*([1] * (tensor.dim() - 1)), -1).expand(*tensor.shape[:-1], -1)
+            return base
         codebook = logits.to(tensor)
         if self.x_mask_gate_router_down is None or self.x_mask_gate_router_up is None:
             base = codebook.mean(dim=0)
