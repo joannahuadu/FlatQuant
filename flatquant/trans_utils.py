@@ -492,23 +492,21 @@ class SVDDecomposeTransMatrix(nn.Module):
             self._last_x_mask_gate_frac_low = None
             self._last_x_mask_gate_frac_high = None
             self._last_x_mask_gate_tok_var = None
-            self._last_x_mask_gate_entropy = None
             return
         self._last_x_mask_gate_mean = r_fp32.mean()
-        self._last_x_mask_gate_std = r_fp32.std(unbiased=False)
-        self._last_x_mask_gate_frac_low = (r_fp32 < 0.05).float().mean()
-        self._last_x_mask_gate_frac_high = (r_fp32 > 0.95).float().mean()
-        # Var_t(g_{t,g}) averaged over groups.
-        r_flat = r_fp32.reshape(-1, r_fp32.shape[-1])
-        mean_g = r_flat.mean(dim=0)
-        var_g = r_flat.pow(2).mean(dim=0) - mean_g.pow(2)
-        self._last_x_mask_gate_tok_var = var_g.clamp_min(0.0).mean()
-        r_clamped = r_fp32.clamp(min=1e-6, max=1.0 - 1e-6)
-        self._last_x_mask_gate_entropy = (
-            -(r_clamped * torch.log(r_clamped) + (1.0 - r_clamped) * torch.log(1.0 - r_clamped)).mean()
-        )
+        with torch.no_grad():
+            stats = r_fp32.detach()
+            stats = stats.to("cpu")
+            self._last_x_mask_gate_std = stats.std(unbiased=False)
+            self._last_x_mask_gate_frac_low = (stats < 0.05).float().mean()
+            self._last_x_mask_gate_frac_high = (stats > 0.95).float().mean()
+            # Var_t(g_{t,g}) averaged over groups.
+            r_flat = stats.reshape(-1, stats.shape[-1])
+            mean_g = r_flat.mean(dim=0)
+            var_g = r_flat.pow(2).mean(dim=0) - mean_g.pow(2)
+            self._last_x_mask_gate_tok_var = var_g.clamp_min(0.0).mean()
 
-    def forward(self, inp, inv_t=False):
+    def forward(self, inp, inv_t=False, apply_x_mask: bool = True):
         if self.add_diag and self.use_diag:
             if inv_t:
                 inp = inp / self.diag_scale.to(inp)
@@ -530,10 +528,7 @@ class SVDDecomposeTransMatrix(nn.Module):
             )
             if self.use_x_perm and self.x_perm_logits is not None:
                 out = self._apply_x_perm(out, use_predictor=not inv_t, eval=self._eval_mode)
-            if not self.use_x_perm and self.use_x_mask:
-                self._last_x_perm_applied=True
-            if self.use_x_mask and not inv_t and self._last_x_perm_applied:
-                out = self._apply_x_mask(out)
+            out = self.apply_x_perm_and_mask(out, inv_t=inv_t, apply_x_perm=False, apply_x_mask=apply_x_mask)
             return out
         matrix_left, matrix_right = matrix_u_left @ torch.diag(linear_diag_left) @ matrix_v_left.t(), matrix_u_right @ torch.diag(linear_diag_right) @ matrix_v_right.t()
         # if not inv_t:
@@ -543,10 +538,7 @@ class SVDDecomposeTransMatrix(nn.Module):
         )
         if self.use_x_perm and self.x_perm_logits is not None:
             out = self._apply_x_perm(out, use_predictor=not inv_t, eval=self._eval_mode)
-        if not self.use_x_perm and self.use_x_mask:
-            self._last_x_perm_applied=True
-        if self.use_x_mask and not inv_t and self._last_x_perm_applied:
-            out = self._apply_x_mask(out)
+        out = self.apply_x_perm_and_mask(out, inv_t=inv_t, apply_x_perm=False, apply_x_mask=apply_x_mask)
         return out
 
     def _apply_right_perm(self, matrix_right):
@@ -669,6 +661,31 @@ class SVDDecomposeTransMatrix(nn.Module):
             hard_sel=hard_sel,
             comp_strength=strength,
         )
+
+    def apply_x_perm_and_mask(
+        self,
+        tensor: torch.Tensor,
+        *,
+        inv_t: bool = False,
+        apply_x_perm: bool = True,
+        apply_x_mask: bool = True,
+        x_perm_already_applied: bool | None = None,
+    ) -> torch.Tensor:
+        use_x_perm = bool(getattr(self, "use_x_perm", False))
+        use_x_mask = bool(getattr(self, "use_x_mask", False))
+        has_x_perm = use_x_perm and getattr(self, "x_perm_logits", None) is not None
+
+        if has_x_perm:
+            if apply_x_perm:
+                tensor = self._apply_x_perm(tensor, use_predictor=not inv_t, eval=self._eval_mode)
+            elif x_perm_already_applied is not None:
+                self._last_x_perm_applied = bool(x_perm_already_applied)
+        else:
+            self._last_x_perm_applied = use_x_mask
+
+        if apply_x_mask and use_x_mask and (not inv_t) and bool(getattr(self, "_last_x_perm_applied", False)):
+            tensor = self._apply_x_mask(tensor)
+        return tensor
 
     def _apply_x_mask(self, tensor):
         self._last_x_mask_ent = None
@@ -1059,7 +1076,7 @@ class InvDecomposeTransMatrix(nn.Module):
                 self.diag_scale = torch.nn.Parameter(diag_init_para, requires_grad=True)
         self._eval_mode = False
 
-    def forward(self, inp, inv_t=False):
+    def forward(self, inp, inv_t=False, apply_x_mask: bool = True):
         if self.add_diag and self.use_diag:
             if inv_t:
                 inp = inp / self.diag_scale.to(inp)
