@@ -6,7 +6,7 @@ import torch.nn as nn
 from flatquant.quant_utils import ActivationQuantizer
 from flatquant.utils import skip_initialization
 from flatquant.function_utils import get_init_scale, get_decompose_dim
-from flatquant.trans_utils import SVDSingleTransMatrix, SVDDecomposeTransMatrix
+from flatquant.trans_utils import SVDSingleTransMatrix, SVDDecomposeTransMatrix, XMaskOnlyTransMatrix
 from flatquant.trans_utils import InvSingleTransMatrix, InvDecomposeTransMatrix
 from flatquant.flat_linear import FlatQuantizedLinear
 
@@ -89,7 +89,40 @@ class FlatQuantLlamaMLP(LlamaMLP):
             down_dim_left, down_dim_right = get_decompose_dim(self.down_proj.linear.weight.shape[1])
             self.down_trans = DecomposeTransMatrix(down_dim_left, down_dim_right, add_diag=self.args.add_diag)
         else:
-            self.up_gate_trans, self.down_trans = None, None
+            need_x_mask = bool(
+                getattr(self.args, "use_x_mask", False)
+                or getattr(self.args, "use_x_mask_comp", False)
+                or getattr(self.args, "use_x_mask_fixed", False)
+                or getattr(self.args, "x_mask_track_err", False)
+                or getattr(self.args, "x_mask_use_err", False)
+                or getattr(self.args, "x_mask_use_r", False)
+                or getattr(self.args, "trainable_gate", False)
+                or getattr(self.args, "trainable_token_gate", False)
+                or getattr(self.args, "trainable_x_mask_fixed_strength", False)
+            )
+            if need_x_mask:
+                up_hidden_dim = self.up_proj.linear.weight.shape[1]
+                down_hidden_dim = self.down_proj.linear.weight.shape[1]
+                self.up_gate_trans = (
+                    XMaskOnlyTransMatrix(
+                        up_hidden_dim,
+                        x_mask_gate_num_codes=getattr(self.args, "x_mask_gate_num_codes", 1),
+                        x_mask_gate_router_dim=getattr(self.args, "x_mask_gate_router_dim", 256),
+                    )
+                    if up_hidden_dim % 4 == 0
+                    else None
+                )
+                self.down_trans = (
+                    XMaskOnlyTransMatrix(
+                        down_hidden_dim,
+                        x_mask_gate_num_codes=getattr(self.args, "x_mask_gate_num_codes", 1),
+                        x_mask_gate_router_dim=getattr(self.args, "x_mask_gate_router_dim", 256),
+                    )
+                    if down_hidden_dim % 4 == 0
+                    else None
+                )
+            else:
+                self.up_gate_trans, self.down_trans = None, None
 
     def _init_sparsity_scale(self):
         up_gate_scale = _compute_sparsity_scale_from_fcs(
@@ -155,9 +188,25 @@ class FlatQuantLlamaMLP(LlamaMLP):
         '''origin implement: down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))'''
         if self.diag_init == "sq_style":
             self.up_smax = torch.maximum(self.up_smax, x.reshape(-1, x.shape[-1]).abs().max(0)[0].clone().detach())
+        if self.up_gate_trans is not None and hasattr(self.up_gate_trans, "apply_x_perm_and_mask"):
+            x = self.up_gate_trans.apply_x_perm_and_mask(
+                x,
+                inv_t=False,
+                apply_x_perm=False,
+                apply_x_mask=True,
+                x_perm_already_applied=False,
+            )
         x = self.act_fn(self.gate_proj._ori_forward(x)) * self.up_proj._ori_forward(x)
         if self.diag_init == "sq_style":
             self.down_smax = torch.maximum(self.down_smax, x.reshape(-1, x.shape[-1]).abs().max(0)[0].clone().detach())
+        if self.down_trans is not None and hasattr(self.down_trans, "apply_x_perm_and_mask"):
+            x = self.down_trans.apply_x_perm_and_mask(
+                x,
+                inv_t=False,
+                apply_x_perm=False,
+                apply_x_mask=True,
+                x_perm_already_applied=False,
+            )
         down_states = self.down_proj._ori_forward(x)
         return down_states
 
@@ -241,7 +290,31 @@ class FlatQuantLlamaAttention(LlamaAttention):
             self.ln_trans = DecomposeTransMatrix(ln_dim_left, ln_dim_right, add_diag=self.args.add_diag)
             self.o_trans = SingleTransMatrix(self.config.num_attention_heads)
         else:
-            self.ln_trans, self.o_trans = None, None
+            need_x_mask = bool(
+                getattr(self.args, "use_x_mask", False)
+                or getattr(self.args, "use_x_mask_comp", False)
+                or getattr(self.args, "use_x_mask_fixed", False)
+                or getattr(self.args, "x_mask_track_err", False)
+                or getattr(self.args, "x_mask_use_err", False)
+                or getattr(self.args, "x_mask_use_r", False)
+                or getattr(self.args, "trainable_gate", False)
+                or getattr(self.args, "trainable_token_gate", False)
+                or getattr(self.args, "trainable_x_mask_fixed_strength", False)
+            )
+            if need_x_mask:
+                hidden_dim = self.q_proj.linear.weight.shape[1]
+                self.ln_trans = (
+                    XMaskOnlyTransMatrix(
+                        hidden_dim,
+                        x_mask_gate_num_codes=getattr(self.args, "x_mask_gate_num_codes", 1),
+                        x_mask_gate_router_dim=getattr(self.args, "x_mask_gate_router_dim", 256),
+                    )
+                    if hidden_dim % 4 == 0
+                    else None
+                )
+            else:
+                self.ln_trans = None
+            self.o_trans = None
 
         head_dim = self.config.hidden_size // self.config.num_attention_heads
         if self.args.k_bits < 16 or self.args.q_bits < 16:

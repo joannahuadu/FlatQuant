@@ -488,15 +488,18 @@ class SVDDecomposeTransMatrix(nn.Module):
             return
         if r_fp32.numel() == 0:
             self._last_x_mask_gate_mean = None
+            self._last_x_mask_gate_mean_grad = None
             self._last_x_mask_gate_std = None
             self._last_x_mask_gate_frac_low = None
             self._last_x_mask_gate_frac_high = None
             self._last_x_mask_gate_tok_var = None
             return
-        self._last_x_mask_gate_mean = r_fp32.mean()
+        keep_grad_mean = bool(getattr(self, "x_mask_gate_mean_requires_grad", False))
+        self._last_x_mask_gate_mean_grad = r_fp32.mean() if keep_grad_mean else None
         with torch.no_grad():
             stats = r_fp32.detach()
             stats = stats.to("cpu")
+            self._last_x_mask_gate_mean = stats.mean()
             self._last_x_mask_gate_std = stats.std(unbiased=False)
             self._last_x_mask_gate_frac_low = (stats < 0.05).float().mean()
             self._last_x_mask_gate_frac_high = (stats > 0.95).float().mean()
@@ -1003,6 +1006,167 @@ class SVDDecomposeTransMatrix(nn.Module):
         else:
             res += f", matrix.shape={self.linear_u_left.weight.shape}, linear_right.shape={self.linear_u_right.weight.shape}, )"
         return res
+
+
+class XMaskOnlyTransMatrix(SVDDecomposeTransMatrix):
+    """Identity transform that only applies x_mask/token-gate logic.
+
+    This is used for BF16 runs where we want x_mask to work in both
+    `_ori_*` and `_trans_*` forward paths, without allocating full trans matrices.
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        *,
+        x_mask_gate_num_codes: int = 1,
+        x_mask_gate_router_dim: int = 256,
+    ):
+        nn.Module.__init__(self)
+        hidden_dim = int(hidden_dim)
+        if hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive; got {hidden_dim}")
+        if hidden_dim % 4 != 0:
+            raise ValueError(f"hidden_dim must be divisible by 4 for x_mask; got {hidden_dim}")
+
+        # Keep the same attribute names as SVDDecomposeTransMatrix so downstream
+        # calibration/training code can reuse them.
+        self._eval_mode = False
+        self.add_diag = False
+        self.use_diag = False
+
+        # Permutation-related fields (not supported in this identity trans).
+        self.perm_logits = None
+        self.perm_temp = 0.01
+        self.perm_iters = 10
+        self.use_perm = False
+        self.use_comp_mask = False
+
+        # x_mask config/state
+        self.use_x_mask = False
+        self.x_mask_alpha = 1.0
+        self.x_mask_mode = "hard_fixed"
+        self.x_mask_tau = 1.0
+        self.x_mask_r_thr = None
+        self.x_mask_r_mode = None
+        self.x_mask_track_err = False
+        self.x_mask_key_ratio = None
+        self.x_mask_key_k = None
+        self.x_mask_use_err = False
+        self.x_mask_use_r = False
+        self.x_mask_use_non_key = False
+        self._x_mask_err_sum = None
+        self._x_mask_err_count = 0
+        self._x_mask_err_avg = None
+        self._x_mask_tok_mse_sum = None
+        self._x_mask_tok_mse_sq_sum = None
+        self._x_mask_tok_ratio_sum = None
+        self._x_mask_tok_ratio_sq_sum = None
+        self._x_mask_tok_count = 0
+        self._x_mask_tok_mse_mean = None
+        self._x_mask_tok_mse_var = None
+        self._x_mask_tok_ratio_mean = None
+        self._x_mask_tok_ratio_var = None
+        self.x_mask_key_idx = None
+        self.x_mask_key_mask = None
+        self.x_mask_non_key_mask = None
+        self.x_mask_non_key_idx = None
+
+        num_groups = hidden_dim // 4
+        self.x_mask_gate_num_codes = int(x_mask_gate_num_codes) if x_mask_gate_num_codes is not None else 1
+        if self.x_mask_gate_num_codes < 1:
+            self.x_mask_gate_num_codes = 1
+        self.x_mask_gate_router_dim = int(x_mask_gate_router_dim) if x_mask_gate_router_dim is not None else 0
+        if self.x_mask_gate_num_codes > 1:
+            self.x_mask_gate_logits = nn.Parameter(
+                torch.zeros((self.x_mask_gate_num_codes, num_groups), dtype=torch.float32), requires_grad=True
+            )
+        else:
+            self.x_mask_gate_logits = nn.Parameter(torch.zeros(num_groups, dtype=torch.float32), requires_grad=True)
+        if self.x_mask_gate_num_codes > 1 and self.x_mask_gate_router_dim > 0:
+            self.x_mask_gate_router_down = nn.Linear(hidden_dim, self.x_mask_gate_router_dim, bias=True)
+            self.x_mask_gate_router_up = nn.Linear(self.x_mask_gate_router_dim, self.x_mask_gate_num_codes, bias=True)
+            nn.init.trunc_normal_(self.x_mask_gate_router_down.weight, std=0.02)
+            nn.init.trunc_normal_(self.x_mask_gate_router_up.weight, std=0.02)
+            if self.x_mask_gate_router_down.bias is not None:
+                nn.init.zeros_(self.x_mask_gate_router_down.bias)
+            if self.x_mask_gate_router_up.bias is not None:
+                nn.init.zeros_(self.x_mask_gate_router_up.bias)
+        else:
+            self.x_mask_gate_router_down = None
+            self.x_mask_gate_router_up = None
+
+        self.x_mask_gate_mean_requires_grad = False
+        self._last_x_mask_gate_mean_grad = None
+
+        self.use_x_mask_comp = False
+        self.x_mask_comp = nn.Parameter(torch.ones(num_groups, dtype=torch.float32), requires_grad=False)
+
+        self.use_x_mask_fixed = False
+        self.x_mask_fixed_pattern = nn.Parameter(torch.zeros(num_groups, dtype=torch.float32), requires_grad=False)
+        self.x_mask_fixed_A = nn.Parameter(torch.zeros(num_groups, 2, 2, dtype=torch.float32), requires_grad=False)
+        self.x_mask_fixed_A_all = nn.Parameter(
+            torch.zeros(num_groups, 6, 2, 2, dtype=torch.float32), requires_grad=False
+        )
+        self.x_mask_fixed_R_all = nn.Parameter(
+            torch.zeros(num_groups, 6, 2, 2, dtype=torch.float32), requires_grad=False
+        )
+        init_strength = 0.95
+        init_logit = float(torch.logit(torch.tensor(init_strength)))
+        self.x_mask_fixed_strength_logits = nn.Parameter(
+            torch.full((num_groups, 1), init_logit, dtype=torch.float32),
+            requires_grad=False,
+        )
+
+        self._last_x_mask_ent = None
+        self._last_x_mask_l2 = None
+        self._last_x_mask_gate_mean = None
+        self._last_x_mask_gate_entropy = None
+        self._last_x_mask_gate_std = None
+        self._last_x_mask_gate_frac_low = None
+        self._last_x_mask_gate_frac_high = None
+        self._last_x_mask_gate_tok_var = None
+        self._last_x_mask_gate_delta_l2 = None
+
+        self.x_mask_token_gate_enabled = False
+        self.x_mask_token_mlp = None
+        self.x_mask_token_mlp_hidden = 0
+        self.x_mask_token_mlp_chunk_size = 1024
+        self.x_mask_token_use_layer_scale = True
+        self.x_mask_token_scale = nn.Parameter(torch.ones((), dtype=torch.float32), requires_grad=False)
+
+        # Cached soft perms (kept for compatibility with training code).
+        self._last_p_soft = None
+        self._last_perm_right = None
+        self._last_x_p_soft = None
+        self._last_x_perm_applied = False
+
+        # x_perm is intentionally disabled in this identity trans.
+        self.use_x_perm = False
+        self.block_size = 64
+        self.hidden_dim = hidden_dim
+        self.x_perm_logits = None
+        self.x_perm_temp = 0.01
+        self.x_perm_iters = 10
+        self.x_perm_chunk_size = 256
+        self.use_x_perm_predictor = False
+        self.x_perm_predictor = None
+        self.x_perm_num_buckets = 64
+        self.x_perm_kmeans_iters = 5
+
+    def forward(self, inp, inv_t: bool = False, apply_x_mask: bool = True):
+        return self.apply_x_perm_and_mask(
+            inp,
+            inv_t=inv_t,
+            apply_x_perm=False,
+            apply_x_mask=apply_x_mask,
+        )
+
+    def to_eval_mode(self):
+        self._eval_mode = True
+
+    def __repr__(self):
+        return f"XMaskOnlyTransMatrix(hidden_dim={self.hidden_dim}, _eval_mode={self._eval_mode})"
 
 
 # ---------- transformation version of direct inverse ----------

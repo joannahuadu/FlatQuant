@@ -1162,6 +1162,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     model.eval()
     use_cache = model.config.use_cache
     model.config.use_cache = False
+    bf16_ori_only = not bool(getattr(args, "quantize", False))
 
     if getattr(args, "trainable_x_mask_fixed_strength", False) and getattr(args, "use_x_mask_fixed", False):
         cali_x_mask_fixed_per(args, model, dataloader, dev, logger)
@@ -1299,8 +1300,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         with torch.no_grad():
             for j in range(args.nsamples):
                 fp_outs[j] = layer(fp_inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
-        layer.self_attn._ori_mode = False
-        layer.mlp._ori_mode = False
+        if not bf16_ori_only:
+            layer.self_attn._ori_mode = False
+            layer.mlp._ori_mode = False
         if args.diag_init == "sq_style":
             layer.self_attn.init_diag_scale(alpha=args.diag_alpha)
             layer.mlp.init_diag_scale(alpha=args.diag_alpha)
@@ -1321,6 +1323,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
             ("mlp.down_trans", layer.mlp.down_trans),
         ):
+            if trans is None:
+                continue
             trans.use_x_mask = args.use_x_mask if args.nm_zero_weight == 0 else False
             if not trans.use_x_mask:
                 continue
@@ -1330,6 +1334,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
             trans.x_mask_track_err = track_x_mask_err
             trans.x_mask_key_ratio = args.x_mask_key_ratio
             trans.x_mask_key_k = args.x_mask_key_k
+            trans.x_mask_gate_mean_requires_grad = bool(getattr(args, "x_mask_gate_cost", 0.0) > 0)
             if "switch_top2" in args.x_mask_mode and args.trainable_gate:
                 if hasattr(trans, "x_mask_gate_logits"):
                     trans.x_mask_gate_logits.data.fill_(0)
@@ -1341,6 +1346,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
                 ("mlp.down_trans", layer.mlp.down_trans),
             ):
+                if trans is None:
+                    continue
                 trans.use_x_perm = args.use_x_perm
                 trans.use_x_perm_predictor = args.use_x_perm_predictor
                 if trans.use_x_perm_predictor and trans.x_perm_predictor is None:
@@ -1369,6 +1376,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
                 ("mlp.down_trans", layer.mlp.down_trans),
             ):
+                if trans is None:
+                    continue
                 trans.use_perm = args.use_perm
                 trans.use_comp_mask = args.use_comp_mask
                 perm_logits[name] = trans.perm_logits
@@ -1497,6 +1506,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 trans.x_mask_alpha = alpha
         def _freeze_x_perm_params():
             for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
+                if trans is None:
+                    continue
                 trans.use_x_perm=False
                 trans.use_x_mask=False
                 x_perm_logits = getattr(trans, "x_perm_logits", None)
@@ -1529,7 +1540,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 if args.use_stage2 and args.stage2_start is not None and epoch == args.stage2_start:
                     _save_stage_ckpt("stage1")
                     for p in perm_logits.values():
-                        p.requires_grad_(False)
+                        if p is not None:
+                            p.requires_grad_(False)
                     for p in get_n_set_parameters_byname(layer, ["trans.x_mask_gate", "trans.x_mask_token_mlp", "trans.x_mask_token_scale"]):
                         p.requires_grad_(False)
                     args.x_mask_gate_cost = 0.0
@@ -1541,7 +1553,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                         if "right" in name:
                             param.requires_grad = False
                     for p in perm_logits.values():
-                        p.requires_grad_(False)
+                        if p is not None:
+                            p.requires_grad_(False)
                     args.dim2_loss_weight = 0.0
                     args.comp_zero_weight = 0.0
                     args.nm_zero_weight = 0.0
@@ -1618,6 +1631,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                 if cur_left is None:
                                     continue
                                 x_prime = pre_trans_cache.get(name, None)
+                                if x_prime is None:
+                                    continue
                                 if name == "self_attn.ln_trans":
                                     quantizer = layer.self_attn.q_proj.act_quantizer
                                 elif name == "mlp.up_gate_trans":
@@ -1641,6 +1656,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                 ("mlp.down_trans", layer.mlp.down_trans),
                             ):
                                 x_prime = pre_trans_cache.get(name, None)
+                                if x_prime is None:
+                                    continue
                                 if name == "self_attn.ln_trans":
                                     quantizer = layer.self_attn.q_proj.act_quantizer
                                 elif name == "mlp.up_gate_trans":
@@ -1687,7 +1704,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                 ("mlp.up_gate_trans", layer.mlp.up_gate_trans),
                                 ("mlp.down_trans", layer.mlp.down_trans),
                             ):
-                                gate_mean = getattr(trans, "_last_x_mask_gate_mean", None)
+                                gate_mean = getattr(trans, "_last_x_mask_gate_mean_grad", None)
+                                if gate_mean is None:
+                                    gate_mean = getattr(trans, "_last_x_mask_gate_mean", None)
                                 if gate_mean is None:
                                     continue
                                 if args.x_mask_gate_target is None:
@@ -1736,7 +1755,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                             if x_perm_reg != 0.0:
                                 loss = loss + args.soft_perm_reg * x_perm_reg
                         mse += loss.detach().cpu()
-                        loss = loss / loss.clone().detach()
+                        loss = loss / loss.clone().detach().clamp_min(1e-12)
                         if not torch.isfinite(loss).item():
                             nan_in_grad = True
                             logger.warning(
