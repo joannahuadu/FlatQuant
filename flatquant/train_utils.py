@@ -1247,12 +1247,28 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     loss_func = torch.nn.MSELoss()
     target_right_by_layer = None
     if args.dim_right == 4 and args.dim2_matrix_path and args.dim2_loss_weight > 0:
-        target_right_by_layer = torch.load(args.dim2_matrix_path, map_location=dev)
+        target_right_by_layer = torch.load(args.dim2_matrix_path, map_location="cpu")
     # start training
-    flat_parameters = {}
+    flat_parameters_path = os.path.join(args.exp_dir, "flat_parameters.pth")
+
+    def _paras_to_cpu(required_names):
+        state = get_paras_dict_by_name(layer, required_names=required_names)
+        for k, v in list(state.items()):
+            state[k] = v.detach().cpu()
+        return state
+
+    def _load_flat_parameters(path):
+        if not os.path.exists(path):
+            return {}
+        return torch.load(path, map_location="cpu")
+
+    def _update_flat_parameters(path, layer_idx, layer_state):
+        ckpt = _load_flat_parameters(path)
+        ckpt[layer_idx] = layer_state
+        torch.save(ckpt, path)
+        del ckpt
+        gc.collect()
     num_train_layer = len(layers)
-    mse_dict = {}
-    perm_logits_by_layer = {}
     track_x_mask_err = False
     for i in range(num_train_layer):
         logger.info(f"========= Layer {i} =========")
@@ -1339,7 +1355,6 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 if trans.use_x_perm_predictor and trans.x_perm_predictor is not None:
                     predictor_params += list(trans.x_perm_predictor.parameters())
                 perm_logits[name] = trans.x_perm_logits
-            perm_logits_by_layer[i] = perm_logits
             if len(predictor_params) > 0:
                 trained_params.append({"params": predictor_params, "lr": layer_lr})
                 paras_name.append("trans.x_perm_predictor")
@@ -1357,7 +1372,6 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 trans.use_perm = args.use_perm
                 trans.use_comp_mask = args.use_comp_mask
                 perm_logits[name] = trans.perm_logits
-            perm_logits_by_layer[i] = perm_logits
         if args.cali_trans:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.linear", ]), "lr": layer_lr})
             paras_name.append("trans.linear")
@@ -1469,11 +1483,13 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 return optim, None
             return optim, _build_scheduler(optim)
         def _save_stage_ckpt(tag):
-            ckpt = dict(flat_parameters)
-            ckpt[i] = get_paras_dict_by_name(layer, required_names=paras_name)
+            ckpt = _load_flat_parameters(flat_parameters_path)
+            ckpt[i] = _paras_to_cpu(required_names=paras_name)
             path = os.path.join(args.exp_dir, f"flat_parameters_{tag}.pth")
             torch.save(ckpt, path)
             logger.info(f"saved stage checkpoint: {path}")
+            del ckpt
+            gc.collect()
         def _set_x_mask_alpha(alpha):
             for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
                 if trans is None or not getattr(trans, "use_x_mask", False):
@@ -1726,8 +1742,20 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                             logger.warning(
                                 f"NaN/Inf loss detected at layer {i}, epoch {epoch}, batch {j}."
                             )
+                            pre_trans_cache.clear()
+                            for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
+                                if trans is None:
+                                    continue
+                                if hasattr(trans, "_last_p_soft"):
+                                    trans._last_p_soft = None
+                                if hasattr(trans, "_last_perm_right"):
+                                    trans._last_perm_right = None
+                                if hasattr(trans, "_last_x_p_soft"):
+                                    trans._last_x_p_soft = None
+                            quant_out = None
+                            loss = None
                             break
-                        optimizer.zero_grad()
+                        optimizer.zero_grad(set_to_none=True)
                         loss.backward()
                         grad_has_nan = False
                         for group in optimizer.param_groups:
@@ -1745,12 +1773,32 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                             logger.warning(
                                 f"NaN detected in gradients at layer {i}, epoch {epoch}, batch {j}."
                             )
+                            pre_trans_cache.clear()
+                            for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
+                                if hasattr(trans, "_last_p_soft"):
+                                    trans._last_p_soft = None
+                                if hasattr(trans, "_last_perm_right"):
+                                    trans._last_perm_right = None
+                                if hasattr(trans, "_last_x_p_soft"):
+                                    trans._last_x_p_soft = None
+                            quant_out = None
+                            loss = None
                             break
                         optimizer.step()
                         scheduler.step()
+                        pre_trans_cache.clear()
+                        for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
+                            if hasattr(trans, "_last_p_soft"):
+                                trans._last_p_soft = None
+                            if hasattr(trans, "_last_perm_right"):
+                                trans._last_perm_right = None
+                            if hasattr(trans, "_last_x_p_soft"):
+                                trans._last_x_p_soft = None
+                        quant_out = None
+                        loss = None
                 if nan_in_grad:
                     break
-                cur_lr = optimizer.state_dict()['param_groups'][0]['lr']
+                cur_lr = optimizer.param_groups[0]["lr"] if len(optimizer.param_groups) > 0 else float("nan")
                 logger.info(f"layer {i} lwc lac iter {epoch}, lr {cur_lr:.8f}  time {time.time() - start_tick:.6f}s, mse: {mse:.8f}" )
                 if (
                     getattr(args, "use_x_mask", False)
@@ -1803,11 +1851,15 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         for h in hooks:
             h.remove()
 
+        if optimizer is not None:
+            optimizer.zero_grad(set_to_none=True)
+        del optimizer, scheduler, pre_trans_cache, hooks, layer_state_before, trained_param_ids
+        gc.collect()
+
         fp_inps, fp_outs = fp_outs, fp_inps
         layers[i] = layer.to("cpu")
-        flat_parameters[i] = get_paras_dict_by_name(layer, required_names=paras_name)
-        torch.save(flat_parameters, os.path.join(args.exp_dir, f"flat_parameters.pth"))
-        logger.info("saved paramaters at {}".format(os.path.join(args.exp_dir, f"flat_parameters.pth")))
+        _update_flat_parameters(flat_parameters_path, i, _paras_to_cpu(required_names=paras_name))
+        logger.info("saved paramaters at {}".format(flat_parameters_path))
         for name, param in layer.named_parameters():
             param.requires_grad = False
             if name in dtype_dict.keys():
