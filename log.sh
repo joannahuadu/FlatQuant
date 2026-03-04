@@ -18,7 +18,7 @@ nohup env CUDA_VISIBLE_DEVICES=0 python log.py \
   --lwc \
   --lac \
   --reload_matrix \
-  --matrix_path ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260222_235731/ \
+  --matrix_path ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260215_014049/ \
   --add_diag \
   --soft_x_perm \
   --soft_perm_reg 0 \
@@ -29,7 +29,7 @@ nohup env CUDA_VISIBLE_DEVICES=0 python log.py \
   --use_x_mask \
   --x_mask_tau 0.03 \
   --x_mask_mode switch_top2_hard \
-  --x_mask_r_thr 0.5 \
+  --x_mask_r_thr 0.1 \
   --x_mask_r_mode gate_raw \
   --no-use_x_perm_predictor \
   --no-use_perm \
@@ -39,7 +39,7 @@ nohup env CUDA_VISIBLE_DEVICES=0 python log.py \
   --lm_eval \
   --tasks winogrande openbookqa mmlu arc_challenge \
   --lm_eval_batch_size 16 \
-  >> "$LOG_DIR/log_exp_20260222_235731_0.5.log" 2>&1 &
+  >> "$LOG_DIR/log_exp_20260215_014049_0.1.log" 2>&1 &
 
 # sleep 30
 

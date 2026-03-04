@@ -17,3 +17,5 @@ log_*.txt
 modelzoo/*
 outputs/*
 *.out
+*.png
+*.sh
