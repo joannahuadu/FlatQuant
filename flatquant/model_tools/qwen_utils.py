@@ -162,7 +162,14 @@ class FlatQuantQwen2Attention(Qwen2Attention):
 
     def _trans_forward_after_ln(self, hidden_states):
         if self.ln_trans is not None:
-            hidden_states = self.ln_trans(hidden_states)
+            hidden_states = self.ln_trans(hidden_states, apply_x_mask=False)
+            if hasattr(self.ln_trans, "apply_x_perm_and_mask"):
+                hidden_states = self.ln_trans.apply_x_perm_and_mask(
+                    hidden_states,
+                    inv_t=False,
+                    apply_x_perm=False,
+                    apply_x_mask=True,
+                )
         query_states = self.q_proj(hidden_states, qa_trans=self.ln_trans)
         key_states = self.k_proj(hidden_states, qa_trans=self.ln_trans)
         if self.args.separate_vtrans:
@@ -175,6 +182,14 @@ class FlatQuantQwen2Attention(Qwen2Attention):
         if self.diag_init == "sq_style" and hasattr(self, "ln_smax"):
             self.ln_smax = torch.maximum(self.ln_smax, \
                 hidden_states.reshape(-1, hidden_states.shape[-1]).abs().max(0)[0].clone().detach())
+        if self.ln_trans is not None and hasattr(self.ln_trans, "apply_x_perm_and_mask"):
+            hidden_states = self.ln_trans.apply_x_perm_and_mask(
+                hidden_states,
+                inv_t=False,
+                apply_x_perm=False,
+                apply_x_mask=True,
+                x_perm_already_applied=False,
+            )
         query_states = self.q_proj._ori_forward(hidden_states)
         key_states = self.k_proj._ori_forward(hidden_states)
         value_states = self.v_proj._ori_forward(hidden_states)
