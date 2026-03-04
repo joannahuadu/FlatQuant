@@ -1272,6 +1272,10 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     num_train_layer = len(layers)
     track_x_mask_err = False
     for i in range(num_train_layer):
+        dim2_loss_weight = args.dim2_loss_weight
+        nm_zero_weight = args.nm_zero_weight
+        comp_zero_weight = args.comp_zero_weight
+        x_mask_gate_cost = args.x_mask_gate_cost
         logger.info(f"========= Layer {i} =========")
         # layer_lr_scale = 1.0 + 2*(i / max(1, num_train_layer - 1))
         layer_lr_scale = 1.0
@@ -1325,7 +1329,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
         ):
             if trans is None:
                 continue
-            trans.use_x_mask = args.use_x_mask if args.nm_zero_weight == 0 else False
+            trans.use_x_mask = args.use_x_mask if nm_zero_weight == 0 else False
             if not trans.use_x_mask:
                 continue
             trans.x_mask_gate_num_codes = args.x_mask_gate_num_codes
@@ -1544,8 +1548,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                             p.requires_grad_(False)
                     for p in get_n_set_parameters_byname(layer, ["trans.x_mask_gate", "trans.x_mask_token_mlp", "trans.x_mask_token_scale"]):
                         p.requires_grad_(False)
-                    args.x_mask_gate_cost = 0.0
-                    args.dim2_loss_weight = 0.0
+                    x_mask_gate_cost = 0.0
+                    dim2_loss_weight = 0.0
                     optimizer = _prune_frozen_param_groups(optimizer)
                 if args.use_stage3 and args.stage3_start is not None and epoch == args.stage3_start:
                     _save_stage_ckpt("stage2")
@@ -1555,9 +1559,9 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                     for p in perm_logits.values():
                         if p is not None:
                             p.requires_grad_(False)
-                    args.dim2_loss_weight = 0.0
-                    args.comp_zero_weight = 0.0
-                    args.nm_zero_weight = 0.0
+                    dim2_loss_weight = 0.0
+                    comp_zero_weight = 0.0
+                    nm_zero_weight = 0.0
                     optimizer = _prune_frozen_param_groups(optimizer)
                     if args.stage3_lr is not None:
                         for g in optimizer.param_groups:
@@ -1572,7 +1576,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                         #     _set_x_mask_alpha(mask_alpha)
                         quant_out = layer(fp_inps[index:index+args.cali_bsz,], attention_mask=attention_mask_batch, position_ids=position_ids)[0]
                         loss = loss_func(fp_outs[index:index+args.cali_bsz,], quant_out)
-                        if target_layer is not None and args.dim2_loss_weight > 0:
+                        if target_layer is not None and dim2_loss_weight > 0:
                             align_loss = 0.0
                             for name, trans in (
                                 ("self_attn.ln_trans", layer.self_attn.ln_trans),
@@ -1614,8 +1618,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                             cur_svals.float(), tgt_svals.float()
                                         )
                             if align_loss != 0.0:
-                                loss = loss + args.dim2_loss_weight * align_loss
-                        if args.comp_zero_weight > 0 and target_layer is not None:
+                                loss = loss + dim2_loss_weight * align_loss
+                        if comp_zero_weight > 0 and target_layer is not None:
                             comp_loss = 0.0
                             for name, trans in (
                                 ("self_attn.ln_trans", layer.self_attn.ln_trans),
@@ -1647,8 +1651,8 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                 tau_comp = tau_comp * args.comp_tau_alpha
                                 comp_loss = comp_loss + torch.mean(torch.relu(comp.abs() - tau_comp) ** 2)
                             if comp_loss != 0.0:
-                                loss = loss + args.comp_zero_weight * comp_loss
-                        if args.nm_zero_weight > 0:
+                                loss = loss + comp_zero_weight * comp_loss
+                        if nm_zero_weight > 0:
                             nm_loss = 0.0
                             for name, trans in (
                                 ("self_attn.ln_trans", layer.self_attn.ln_trans),
@@ -1674,7 +1678,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                 tau_comp = tau_comp * args.comp_tau_alpha
                                 nm_loss = nm_loss + torch.mean(torch.relu(comp.abs() - tau_comp) ** 2)
                             if nm_loss != 0.0:
-                                loss = loss + args.nm_zero_weight * nm_loss
+                                loss = loss + nm_zero_weight * nm_loss
                         if args.x_mask_energy_weight > 0 or args.x_mask_2hot_weight > 0:
                             energy_loss = None
                             twohot_loss = None
@@ -1697,7 +1701,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                 loss = loss + args.x_mask_energy_weight * energy_loss
                             if twohot_loss is not None:
                                 loss = loss + args.x_mask_2hot_weight * twohot_loss
-                        if args.x_mask_gate_cost > 0:
+                        if x_mask_gate_cost > 0:
                             gate_cost = None
                             for name, trans in (
                                 ("self_attn.ln_trans", layer.self_attn.ln_trans),
@@ -1715,7 +1719,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                                     cost = ((gate_mean - args.x_mask_gate_target) ** 2)
                                 gate_cost = cost if gate_cost is None else gate_cost + cost
                             if gate_cost is not None:
-                                loss = loss + args.x_mask_gate_cost * gate_cost
+                                loss = loss + x_mask_gate_cost * gate_cost
                         if args.x_mask_gate_entropy > 0:
                             gate_entropy = None
                             for name, trans in (
