@@ -119,26 +119,7 @@ def reparameterize_model(
     use_x_perm_predictor=False,
     x_perm_num_clusters=4,
     x_perm_pred_hidden=128,
-    x_mask_token_gate_mode="static_all",
-    x_mask_token_gate_deep_ratio=0.5,
-    x_mask_token_gate_deep_start=-1,
-    x_mask_token_mlp_hidden=0,
-    x_mask_token_mlp_chunk_size=1024,
-    x_mask_token_mlp_shared=True,
-    x_mask_token_use_layer_scale=True,
 ):
-    configure_x_mask_token_gate(
-        model,
-        use_x_mask=use_x_mask,
-        x_mask_mode=x_mask_mode,
-        x_mask_token_gate_mode=x_mask_token_gate_mode,
-        x_mask_token_gate_deep_ratio=x_mask_token_gate_deep_ratio,
-        x_mask_token_gate_deep_start=x_mask_token_gate_deep_start,
-        x_mask_token_mlp_hidden=x_mask_token_mlp_hidden,
-        x_mask_token_mlp_chunk_size=x_mask_token_mlp_chunk_size,
-        x_mask_token_mlp_shared=x_mask_token_mlp_shared,
-        x_mask_token_use_layer_scale=x_mask_token_use_layer_scale,
-    )
     for idx in range(model.config.num_hidden_layers):
         layer = model.model.layers[idx]
         if layer.self_attn.ln_trans is not None:

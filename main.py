@@ -76,6 +76,18 @@ def main():
 
     if apply_flatquant:
         model = apply_flatquant_to_model(args, model)
+        flat_utils.configure_x_mask_token_gate(
+            model,
+            use_x_mask=getattr(args, "use_x_mask", False),
+            x_mask_mode=getattr(args, "x_mask_mode", "hard_fixed"),
+            x_mask_token_gate_mode=getattr(args, "x_mask_token_gate_mode", "static_all"),
+            x_mask_token_gate_deep_ratio=getattr(args, "x_mask_token_gate_deep_ratio", 0.5),
+            x_mask_token_gate_deep_start=getattr(args, "x_mask_token_gate_deep_start", -1),
+            x_mask_token_mlp_hidden=getattr(args, "x_mask_token_mlp_hidden", 0),
+            x_mask_token_mlp_chunk_size=getattr(args, "x_mask_token_mlp_chunk_size", 1024),
+            x_mask_token_mlp_shared=getattr(args, "x_mask_token_mlp_shared", True),
+            x_mask_token_use_layer_scale=getattr(args, "x_mask_token_use_layer_scale", True),
+        )
         logger.info("Finished applying FlatQuant to model.")
         if args.act_sparsity:
             configure_act_sparsity(model, args, logger)
@@ -117,14 +129,7 @@ def main():
                 x_mask_r_mode=args.x_mask_r_mode,
                 use_x_perm_predictor=args.use_x_perm_predictor,
                 x_perm_num_clusters=args.x_perm_num_clusters,
-                x_perm_pred_hidden=args.x_perm_pred_hidden,
-                x_mask_token_gate_mode=args.x_mask_token_gate_mode,
-                x_mask_token_gate_deep_ratio=args.x_mask_token_gate_deep_ratio,
-                x_mask_token_gate_deep_start=args.x_mask_token_gate_deep_start,
-                x_mask_token_mlp_hidden=args.x_mask_token_mlp_hidden,
-                x_mask_token_mlp_chunk_size=args.x_mask_token_mlp_chunk_size,
-                x_mask_token_mlp_shared=args.x_mask_token_mlp_shared,
-                x_mask_token_use_layer_scale=args.x_mask_token_use_layer_scale,
+                x_perm_pred_hidden=args.x_perm_pred_hidden
             )
             logger.info("Finished reparameterize model.")
         else:

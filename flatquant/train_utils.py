@@ -1167,19 +1167,6 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     if getattr(args, "trainable_x_mask_fixed_strength", False) and getattr(args, "use_x_mask_fixed", False):
         cali_x_mask_fixed_per(args, model, dataloader, dev, logger)
 
-    configure_x_mask_token_gate(
-        model,
-        use_x_mask=getattr(args, "use_x_mask", False),
-        x_mask_mode=getattr(args, "x_mask_mode", "hard_fixed"),
-        x_mask_token_gate_mode=getattr(args, "x_mask_token_gate_mode", "static_all"),
-        x_mask_token_gate_deep_ratio=getattr(args, "x_mask_token_gate_deep_ratio", 0.5),
-        x_mask_token_gate_deep_start=getattr(args, "x_mask_token_gate_deep_start", -1),
-        x_mask_token_mlp_hidden=getattr(args, "x_mask_token_mlp_hidden", 0),
-        x_mask_token_mlp_chunk_size=getattr(args, "x_mask_token_mlp_chunk_size", 1024),
-        x_mask_token_mlp_shared=getattr(args, "x_mask_token_mlp_shared", True),
-        x_mask_token_use_layer_scale=getattr(args, "x_mask_token_use_layer_scale", True),
-    )
-
     # check trainable parameters
     for name, param in model.named_parameters():
         param.requires_grad = False
@@ -1385,7 +1372,7 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
                 trans.use_perm = args.use_perm
                 trans.use_comp_mask = args.use_comp_mask
                 perm_logits[name] = trans.perm_logits
-        if args.cali_trans:
+        if args.cali_trans and args.quantize:
             trained_params.append({"params": get_n_set_parameters_byname(layer, ["trans.linear", ]), "lr": layer_lr})
             paras_name.append("trans.linear")
         if args.add_diag and args.cali_trans:

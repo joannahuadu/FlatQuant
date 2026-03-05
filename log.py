@@ -181,12 +181,24 @@ def main():
 
     if args.quantize:
         model = apply_flatquant_to_model(args, model)
+        flat_utils.configure_x_mask_token_gate(
+            model,
+            use_x_mask=getattr(args, "use_x_mask", False),
+            x_mask_mode=getattr(args, "x_mask_mode", "hard_fixed"),
+            x_mask_token_gate_mode=getattr(args, "x_mask_token_gate_mode", "static_all"),
+            x_mask_token_gate_deep_ratio=getattr(args, "x_mask_token_gate_deep_ratio", 0.5),
+            x_mask_token_gate_deep_start=getattr(args, "x_mask_token_gate_deep_start", -1),
+            x_mask_token_mlp_hidden=getattr(args, "x_mask_token_mlp_hidden", 0),
+            x_mask_token_mlp_chunk_size=getattr(args, "x_mask_token_mlp_chunk_size", 1024),
+            x_mask_token_mlp_shared=getattr(args, "x_mask_token_mlp_shared", True),
+            x_mask_token_use_layer_scale=getattr(args, "x_mask_token_use_layer_scale", True),
+        )
         logger.info("Finished applying FlatQuant to model.")
         if args.act_sparsity:
             configure_act_sparsity(model, args, logger)
         if args.resume:
             flat_utils.load_flat_parameters(args, model)
-        elif args.reload_matrix:
+        if args.reload_matrix:
             flat_utils.load_flat_matrices(args, model, path=args.matrix_path)
         elif (args.cali_trans or args.add_diag or args.lwc or args.lac or args.soft_x_perm or args.soft_perm):
             train_utils.cali_flat_quant(args, model, trainloader, utils.DEV, logger=logger)
