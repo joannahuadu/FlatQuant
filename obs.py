@@ -70,8 +70,8 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
     if x.shape[0] != 2048:
         logger.warning(f"First dim is {x.shape[0]} (expected 2048); continuing without reshape.")
 
-    x_np = x.abs().float().cpu()
-    flat = x_np.view(-1)
+    x_abs = x.abs().float().cpu()
+    flat = x_abs.view(-1)
     if flat.numel() > 2_000_000:
         idx = torch.randperm(flat.numel(), device=flat.device)[:2_000_000]
         flat_q = flat[idx]
@@ -81,7 +81,8 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
     hi = torch.quantile(flat_q, 0.99).item()
     vmin = max(lo, 1e-9)
     vmax = max(hi, vmin * 10)
-    x_np = x_np.numpy()
+    x_np = x_abs.numpy()
+    x0_mask = (x_np == 0)
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -104,12 +105,39 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
         logger.info(f"Heatmap saved to {path}")
 
     _plot_and_save(x_np, save_path)
+    # x_np == 0 mask (useful to visualize sparsity patterns)
+    def _plot_mask_and_save(mask, path, title_suffix=""):
+        ratio = float(mask.mean()) if hasattr(mask, "mean") else float("nan")
+        plt.figure(figsize=(12, 6))
+        plt.imshow(mask.astype("uint8"), aspect="auto", cmap="gray_r", vmin=0, vmax=1, interpolation="nearest")
+        plt.colorbar(label="x_np == 0 (0/1)")
+        plt.xlabel("Hidden dimension")
+        plt.ylabel("Sequence position")
+        title = f"x_np == 0 mask (ratio={ratio:.6f})"
+        if title_suffix:
+            title = f"{title} - {title_suffix}"
+        plt.title(title)
+        plt.tight_layout()
+        plt.savefig(path)
+        plt.close()
+        logger.info(f"Mask heatmap saved to {path}")
+
+    mask_path = save_path.with_name(save_path.stem + "_mask_xeq0.png")
+    _plot_mask_and_save(x0_mask, mask_path)
     block_cols = min(64, x_np.shape[1])
     block_rows = min(64, x_np.shape[0])
     block_path = save_path.with_name(save_path.stem + "_c0-63.png")
     _plot_and_save(x_np[:, :block_cols], block_path, title_suffix=f"Columns 0-{block_cols-1}")
     block_path_ = save_path.with_name(save_path.stem + "_r0-63_c0-63.png")
     _plot_and_save(x_np[:block_rows, :block_cols], block_path_, title_suffix=f"Row 0-{block_rows-1}, Columns 0-{block_cols-1}", height=6)
+    mask_block_path = save_path.with_name(save_path.stem + "_mask_xeq0_c0-63.png")
+    _plot_mask_and_save(x0_mask[:, :block_cols], mask_block_path, title_suffix=f"Columns 0-{block_cols-1}")
+    mask_block_path_ = save_path.with_name(save_path.stem + "_mask_xeq0_r0-63_c0-63.png")
+    _plot_mask_and_save(
+        x0_mask[:block_rows, :block_cols],
+        mask_block_path_,
+        title_suffix=f"Row 0-{block_rows-1}, Columns 0-{block_cols-1}",
+    )
 
 def _register_obs_hook(model, args, logger):
     """Attach hooks to capture activations according to args."""
