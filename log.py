@@ -118,7 +118,16 @@ def _is_target_module(name: str) -> bool:
         "mlp.gate_proj",
         "mlp.down_proj",
     )
-    return name.endswith(suffixes)
+    suffixes_ = (
+        "self_attn.q_proj.linear",
+        "self_attn.k_proj.linear",
+        "self_attn.v_proj.linear",
+        "self_attn.o_proj.linear",
+        "mlp.up_proj.linear",
+        "mlp.gate_proj.linear",
+        "mlp.down_proj.linear",
+    )
+    return name.endswith(suffixes) or name.endswith(suffixes_)
 
 
 def _register_log_hooks(model, logger, args):
@@ -179,37 +188,88 @@ def main():
     )
     logger.info("Finished loading training data.")
 
-    if args.quantize:
+    apply_flatquant = bool(
+        args.quantize
+        or args.resume
+        or args.reload_matrix
+        or args.cali_trans
+        or args.add_diag
+        or args.lwc
+        or args.lac
+        or args.soft_x_perm
+        or args.soft_perm
+        or getattr(args, "use_x_mask", False)
+        or getattr(args, "use_x_mask_comp", False)
+        or getattr(args, "use_x_mask_fixed", False)
+        or getattr(args, "x_mask_track_err", False)
+        or getattr(args, "x_mask_use_err", False)
+        or getattr(args, "x_mask_use_r", False)
+        or getattr(args, "trainable_x_mask_fixed_strength", False)
+    )
+
+    if apply_flatquant:
         model = apply_flatquant_to_model(args, model)
+        flat_utils.configure_x_mask_token_gate(
+            model,
+            use_x_mask=getattr(args, "use_x_mask", False),
+            x_mask_mode=getattr(args, "x_mask_mode", "hard_fixed"),
+            x_mask_token_gate_mode=getattr(args, "x_mask_token_gate_mode", "static_all"),
+            x_mask_token_gate_deep_ratio=getattr(args, "x_mask_token_gate_deep_ratio", 0.5),
+            x_mask_token_gate_deep_start=getattr(args, "x_mask_token_gate_deep_start", -1),
+            x_mask_token_mlp_hidden=getattr(args, "x_mask_token_mlp_hidden", 0),
+            x_mask_token_mlp_chunk_size=getattr(args, "x_mask_token_mlp_chunk_size", 1024),
+            x_mask_token_mlp_shared=getattr(args, "x_mask_token_mlp_shared", True),
+            x_mask_token_use_layer_scale=getattr(args, "x_mask_token_use_layer_scale", True),
+        )
         logger.info("Finished applying FlatQuant to model.")
         if args.act_sparsity:
             configure_act_sparsity(model, args, logger)
         if args.resume:
             flat_utils.load_flat_parameters(args, model)
-        elif args.reload_matrix:
+        if args.reload_matrix:
             flat_utils.load_flat_matrices(args, model, path=args.matrix_path)
         elif (args.cali_trans or args.add_diag or args.lwc or args.lac or args.soft_x_perm or args.soft_perm):
             train_utils.cali_flat_quant(args, model, trainloader, utils.DEV, logger=logger)
         if args.save_matrix and not args.reload_matrix:
             flat_utils.save_flat_matrices(args, model)
-        flat_utils.reparameterize_model(
-            model,
-            use_perm=args.use_perm,
-            use_comp_mask=args.use_comp_mask,
-            use_x_perm=args.use_x_perm,
-            use_x_mask=args.use_x_mask,
-            x_mask_mode=args.x_mask_mode,
-            x_mask_tau=args.x_mask_tau,
-            x_mask_r_thr=args.x_mask_r_thr,
-            x_mask_r_mode=args.x_mask_r_mode,
-            x_mask_track_err=args.x_mask_track_err,
-            x_mask_key_ratio=args.x_mask_key_ratio,
-            x_mask_key_k=args.x_mask_key_k,
-            use_x_perm_predictor=args.use_x_perm_predictor,
-            x_perm_num_clusters=args.x_perm_num_clusters,
-            x_perm_pred_hidden=args.x_perm_pred_hidden,
-        )
-        logger.info("Finished reparameterize model.")
+        if args.quantize:
+            flat_utils.reparameterize_model(
+                model,
+                use_perm=args.use_perm,
+                use_comp_mask=args.use_comp_mask,
+                use_x_perm=args.use_x_perm,
+                use_x_mask=args.use_x_mask,
+                x_mask_mode=args.x_mask_mode,
+                x_mask_tau=args.x_mask_tau,
+                x_mask_r_thr=args.x_mask_r_thr,
+                x_mask_r_mode=args.x_mask_r_mode,
+                x_mask_track_err=args.x_mask_track_err,
+                x_mask_key_ratio=args.x_mask_key_ratio,
+                x_mask_key_k=args.x_mask_key_k,
+                use_x_perm_predictor=args.use_x_perm_predictor,
+                x_perm_num_clusters=args.x_perm_num_clusters,
+                x_perm_pred_hidden=args.x_perm_pred_hidden,
+            )
+            logger.info("Finished reparameterize model.")
+        else:
+            flat_utils.reparameterize_ori_model(
+                model,
+                use_perm=args.use_perm,
+                use_comp_mask=args.use_comp_mask,
+                use_x_perm=args.use_x_perm,
+                use_x_mask=args.use_x_mask,
+                x_mask_mode=args.x_mask_mode,
+                x_mask_tau=args.x_mask_tau,
+                x_mask_r_thr=args.x_mask_r_thr,
+                x_mask_r_mode=args.x_mask_r_mode,
+                x_mask_track_err=args.x_mask_track_err,
+                x_mask_key_ratio=args.x_mask_key_ratio,
+                x_mask_key_k=args.x_mask_key_k,
+                use_x_perm_predictor=args.use_x_perm_predictor,
+                x_perm_num_clusters=args.x_perm_num_clusters,
+                x_perm_pred_hidden=args.x_perm_pred_hidden,
+            )
+            logger.info("BF16 mode: skip reparameterize_model (keep _ori_mode=True).")
 
     if args.w_bits < 16:
         if args.gptq:

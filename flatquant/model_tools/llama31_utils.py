@@ -401,14 +401,7 @@ class FlatQuantLlamaAttention(LlamaAttention):
     def _trans_forward_after_ln(self, hidden_states):
         hidden_states = self._maybe_sparse(hidden_states, self.q_proj.sparsity_scale)
         if self.ln_trans is not None:
-            hidden_states = self.ln_trans(hidden_states, apply_x_mask=False)
-            if hasattr(self.ln_trans, "apply_x_perm_and_mask"):
-                hidden_states = self.ln_trans.apply_x_perm_and_mask(
-                    hidden_states,
-                    inv_t=False,
-                    apply_x_perm=False,
-                    apply_x_mask=True,
-                )
+            hidden_states = self.ln_trans(hidden_states)
         query_states = self.q_proj(hidden_states, qa_trans=self.ln_trans)
         key_states = self.k_proj(hidden_states, qa_trans=self.ln_trans)
         if self.args.separate_vtrans:

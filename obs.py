@@ -86,8 +86,8 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def _plot_and_save(array, path, title_suffix=""):
-        plt.figure(figsize=(12, 6))
+    def _plot_and_save(array, path, title_suffix="", height=12):
+        plt.figure(figsize=(height, 6))
         plt.imshow(
             array,
             aspect="auto",
@@ -106,9 +106,9 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
 
     _plot_and_save(x_np, save_path)
     # x_np == 0 mask (useful to visualize sparsity patterns)
-    def _plot_mask_and_save(mask, path, title_suffix=""):
+    def _plot_mask_and_save(mask, path, title_suffix="", height=12):
         ratio = float(mask.mean()) if hasattr(mask, "mean") else float("nan")
-        plt.figure(figsize=(12, 6))
+        plt.figure(figsize=(height, 6))
         plt.imshow(mask.astype("uint8"), aspect="auto", cmap="gray_r", vmin=0, vmax=1, interpolation="nearest")
         plt.colorbar(label="x_np == 0 (0/1)")
         plt.xlabel("Hidden dimension")
@@ -129,7 +129,7 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
     block_path = save_path.with_name(save_path.stem + "_c0-63.png")
     _plot_and_save(x_np[:, :block_cols], block_path, title_suffix=f"Columns 0-{block_cols-1}")
     block_path_ = save_path.with_name(save_path.stem + "_r0-63_c0-63.png")
-    _plot_and_save(x_np[:block_rows, :block_cols], block_path_, title_suffix=f"Row 0-{block_rows-1}, Columns 0-{block_cols-1}")
+    _plot_and_save(x_np[:block_rows, :block_cols], block_path_, title_suffix=f"Row 0-{block_rows-1}, Columns 0-{block_cols-1}", height=8)
     mask_block_path = save_path.with_name(save_path.stem + "_mask_xeq0_c0-63.png")
     _plot_mask_and_save(x0_mask[:, :block_cols], mask_block_path, title_suffix=f"Columns 0-{block_cols-1}")
     mask_block_path_ = save_path.with_name(save_path.stem + "_mask_xeq0_r0-63_c0-63.png")
@@ -137,6 +137,7 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
         x0_mask[:block_rows, :block_cols],
         mask_block_path_,
         title_suffix=f"Row 0-{block_rows-1}, Columns 0-{block_cols-1}",
+        height=8
     )
 
 def _register_obs_hook(model, args, logger):
@@ -273,8 +274,39 @@ def main():
     )
     logger.info("Finished loading training data.")
 
-    if args.quantize:
+    apply_flatquant = bool(
+        args.quantize
+        or args.resume
+        or args.reload_matrix
+        or args.cali_trans
+        or args.add_diag
+        or args.lwc
+        or args.lac
+        or args.soft_x_perm
+        or args.soft_perm
+        or getattr(args, "use_x_mask", False)
+        or getattr(args, "use_x_mask_comp", False)
+        or getattr(args, "use_x_mask_fixed", False)
+        or getattr(args, "x_mask_track_err", False)
+        or getattr(args, "x_mask_use_err", False)
+        or getattr(args, "x_mask_use_r", False)
+        or getattr(args, "trainable_x_mask_fixed_strength", False)
+    )
+
+    if apply_flatquant:
         model = apply_flatquant_to_model(args, model)
+        flat_utils.configure_x_mask_token_gate(
+            model,
+            use_x_mask=getattr(args, "use_x_mask", False),
+            x_mask_mode=getattr(args, "x_mask_mode", "hard_fixed"),
+            x_mask_token_gate_mode=getattr(args, "x_mask_token_gate_mode", "static_all"),
+            x_mask_token_gate_deep_ratio=getattr(args, "x_mask_token_gate_deep_ratio", 0.5),
+            x_mask_token_gate_deep_start=getattr(args, "x_mask_token_gate_deep_start", -1),
+            x_mask_token_mlp_hidden=getattr(args, "x_mask_token_mlp_hidden", 0),
+            x_mask_token_mlp_chunk_size=getattr(args, "x_mask_token_mlp_chunk_size", 1024),
+            x_mask_token_mlp_shared=getattr(args, "x_mask_token_mlp_shared", True),
+            x_mask_token_use_layer_scale=getattr(args, "x_mask_token_use_layer_scale", True),
+        )
         logger.info("Finished applying FlatQuant to model.")
         if args.act_sparsity:
             flatquant_modules = [m for m in model.modules() if hasattr(m, "_init_sparsity_scale")]
@@ -288,24 +320,44 @@ def main():
             train_utils.cali_flat_quant(args, model, trainloader, utils.DEV, logger=logger)
         if args.save_matrix and not args.reload_matrix:
             flat_utils.save_flat_matrices(args, model)
-        flat_utils.reparameterize_model(
-            model,
-            use_perm=args.use_perm,
-            use_comp_mask=args.use_comp_mask,
-            use_x_perm=args.use_x_perm,
-            use_x_mask=args.use_x_mask,
-            x_mask_mode=args.x_mask_mode,
-            x_mask_tau=args.x_mask_tau,
-            x_mask_r_thr=args.x_mask_r_thr,
-            x_mask_r_mode=args.x_mask_r_mode,
-            x_mask_track_err=args.x_mask_track_err,
-            x_mask_key_ratio=args.x_mask_key_ratio,
-            x_mask_key_k=args.x_mask_key_k,
-            use_x_perm_predictor=args.use_x_perm_predictor,
-            x_perm_num_clusters=args.x_perm_num_clusters,
-            x_perm_pred_hidden=args.x_perm_pred_hidden,
-        )
-        logger.info("Finished reparameterize model.")
+        if args.quantize:
+            flat_utils.reparameterize_model(
+                model,
+                use_perm=args.use_perm,
+                use_comp_mask=args.use_comp_mask,
+                use_x_perm=args.use_x_perm,
+                use_x_mask=args.use_x_mask,
+                x_mask_mode=args.x_mask_mode,
+                x_mask_tau=args.x_mask_tau,
+                x_mask_r_thr=args.x_mask_r_thr,
+                x_mask_r_mode=args.x_mask_r_mode,
+                x_mask_track_err=args.x_mask_track_err,
+                x_mask_key_ratio=args.x_mask_key_ratio,
+                x_mask_key_k=args.x_mask_key_k,
+                use_x_perm_predictor=args.use_x_perm_predictor,
+                x_perm_num_clusters=args.x_perm_num_clusters,
+                x_perm_pred_hidden=args.x_perm_pred_hidden,
+            )
+            logger.info("Finished reparameterize model.")
+        else:
+            flat_utils.reparameterize_ori_model(
+                model,
+                use_perm=args.use_perm,
+                use_comp_mask=args.use_comp_mask,
+                use_x_perm=args.use_x_perm,
+                use_x_mask=args.use_x_mask,
+                x_mask_mode=args.x_mask_mode,
+                x_mask_tau=args.x_mask_tau,
+                x_mask_r_thr=args.x_mask_r_thr,
+                x_mask_r_mode=args.x_mask_r_mode,
+                x_mask_track_err=args.x_mask_track_err,
+                x_mask_key_ratio=args.x_mask_key_ratio,
+                x_mask_key_k=args.x_mask_key_k,
+                use_x_perm_predictor=args.use_x_perm_predictor,
+                x_perm_num_clusters=args.x_perm_num_clusters,
+                x_perm_pred_hidden=args.x_perm_pred_hidden,
+            )
+            logger.info("BF16 mode: skip reparameterize_model (keep _ori_mode=True).")
 
     quantizers = None
     if args.w_bits < 16:

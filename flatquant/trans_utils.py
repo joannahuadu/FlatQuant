@@ -791,8 +791,9 @@ class SVDDecomposeTransMatrix(nn.Module):
                     r = torch.ones_like(logits)
                 else:
                     r, r_fp32 = self._compute_x_mask_gate_r(logits, reshaped)
-                    self._update_x_mask_gate_stats(r_fp32)
-            if r is not None and self._last_x_mask_gate_mean is None:
+                    if not self._eval_mode:
+                        self._update_x_mask_gate_stats(r_fp32)
+            if r is not None and self._last_x_mask_gate_mean is None and not self._eval_mode:
                 self._update_x_mask_gate_stats(r.float())
             r = r.unsqueeze(-1)
             mixed = r * reshaped + (1.0 - r) * x_sp

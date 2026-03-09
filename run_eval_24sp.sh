@@ -422,18 +422,51 @@ TS="$(date +%Y%m%d_%H%M%S)"
 #   --lm_eval_batch_size 16 \
 #   >> "$LOG_DIR/eval_w4a4_24sp_r11e-4_ep30_lr5e-3_usexperm_usexmask.log" 2>&1 &
 
-nohup env CUDA_VISIBLE_DEVICES=2 python main.py \
+# nohup env CUDA_VISIBLE_DEVICES=2 python main.py \
+#   --model "$MODEL_PATH" \
+#   --w_bits 4 \
+#   --a_bits 4 \
+#   --gptq \
+#   --cali_bsz 4 \
+#   --epoch 45 \
+#   --flat_lr 5e-3 \
+#   --lwc \
+#   --lac \
+#   --cali_trans \
+#   --resume \
+#   --matrix_path /gemini/code/NMSparsity/FlatQuant/outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260202_003601 \
+#   --diag_init one_style \
+#   --add_diag \
+#   --x_mask_gate_cost 0.0001 \
+#   --stage2_start 30 \
+#   --use_stage2 \
+#   --no-x_mask_token_use_layer_scale \
+#   --no-use_x_perm \
+#   --use_x_mask \
+#   --x_mask_tau 0.03 \
+#   --x_mask_mode switch_top2_hard \
+#   --x_mask_token_gate_mode token_all \
+#   --trainable_token_gate \
+#   --trainable_gate \
+#   --no-use_x_perm_predictor \
+#   --no-use_perm \
+#   --no-use_comp_mask \
+#   --output_dir ./outputs \
+#   --save_matrix \
+#   --lm_eval \
+#   --tasks winogrande openbookqa mmlu arc_challenge \
+#   --lm_eval_batch_size 16 \
+#   >> "$LOG_DIR/eval_w4a4_24sp_r11e-4_tokenall_sharemlp_ep45_stage2_30_lr5e-3_usexperm_usexmask.log" 2>&1 &
+
+# sleep 30
+
+nohup env CUDA_VISIBLE_DEVICES=3 python main.py \
   --model "$MODEL_PATH" \
-  --w_bits 4 \
-  --a_bits 4 \
-  --gptq \
   --cali_bsz 4 \
   --epoch 30 \
   --flat_lr 5e-3 \
-  --lwc \
-  --lac \
   --cali_trans \
-  --add_diag \
+  --diag_init one_style \
   --x_mask_gate_cost 0.0001 \
   --no-x_mask_token_use_layer_scale \
   --no-use_x_perm \
@@ -451,38 +484,43 @@ nohup env CUDA_VISIBLE_DEVICES=2 python main.py \
   --lm_eval \
   --tasks winogrande openbookqa mmlu arc_challenge \
   --lm_eval_batch_size 16 \
-  >> "$LOG_DIR/eval_w4a4_24sp_r11e-4_tokenall_ep30_lr5e-3_usexperm_usexmask.log" 2>&1 &
+  >> "$LOG_DIR/eval_bf16_24sp_r11e-4_tokenall_sharemlp_ep30_lr5e-3_usexperm_usexmask.log" 2>&1 &
 
-sleep 30
+# sleep 30
 
-nohup env CUDA_VISIBLE_DEVICES=3 python main.py \
-  --model "$MODEL_PATH" \
-  --w_bits 4 \
-  --a_bits 4 \
-  --gptq \
-  --cali_bsz 4 \
-  --epoch 30 \
-  --flat_lr 5e-3 \
-  --lwc \
-  --lac \
-  --cali_trans \
-  --add_diag \
-  --x_mask_gate_cost 0.0001 \
-  --no-x_mask_token_use_layer_scale \
-  --no-use_x_perm \
-  --use_x_mask \
-  --x_mask_tau 0.03 \
-  --x_mask_mode switch_top2_hard \
-  --x_mask_token_gate_mode token_deep \
-  --x_mask_token_gate_deep_start 5 \
-  --trainable_token_gate \
-  --trainable_gate \
-  --no-use_x_perm_predictor \
-  --no-use_perm \
-  --no-use_comp_mask \
-  --output_dir ./outputs \
-  --save_matrix \
-  --lm_eval \
-  --tasks winogrande openbookqa mmlu arc_challenge \
-  --lm_eval_batch_size 16 \
-  >> "$LOG_DIR/eval_w4a4_24sp_r11e-4_tokendeep_ep30_lr5e-3_usexperm_usexmask.log" 2>&1 &
+# nohup env CUDA_VISIBLE_DEVICES=1 python main.py \
+#   --model "$MODEL_PATH" \
+#   --w_bits 4 \
+#   --a_bits 4 \
+#   --gptq \
+#   --cali_bsz 4 \
+#   --epoch 45 \
+#   --flat_lr 5e-3 \
+#   --lwc \
+#   --lac \
+#   --cali_trans \
+#   --resume \
+#   --matrix_path /gemini/code/NMSparsity/FlatQuant/outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260202_003601 \
+#   --diag_init one_style \
+#   --add_diag \
+#   --x_mask_gate_cost 0.0001 \
+#   --stage2_start 30 \
+#   --use_stage2 \
+#   --no-x_mask_token_use_layer_scale \
+#   --no-x_mask_token_mlp_shared \
+#   --no-use_x_perm \
+#   --use_x_mask \
+#   --x_mask_tau 0.03 \
+#   --x_mask_mode switch_top2_hard \
+#   --x_mask_token_gate_mode token_all \
+#   --trainable_token_gate \
+#   --trainable_gate \
+#   --no-use_x_perm_predictor \
+#   --no-use_perm \
+#   --no-use_comp_mask \
+#   --output_dir ./outputs \
+#   --save_matrix \
+#   --lm_eval \
+#   --tasks winogrande openbookqa mmlu arc_challenge \
+#   --lm_eval_batch_size 16 \
+#   >> "$LOG_DIR/eval_w4a4_24sp_r11e-4_tokenall_nosharemlp_ep45_stage2_30_lr5e-3_usexperm_usexmask.log" 2>&1 &
