@@ -106,9 +106,9 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
 
     _plot_and_save(x_np, save_path)
     # x_np == 0 mask (useful to visualize sparsity patterns)
-    def _plot_mask_and_save(mask, path, title_suffix=""):
+    def _plot_mask_and_save(mask, path, title_suffix="", height=12):
         ratio = float(mask.mean()) if hasattr(mask, "mean") else float("nan")
-        plt.figure(figsize=(12, 6))
+        plt.figure(figsize=(height, 6))
         plt.imshow(mask.astype("uint8"), aspect="auto", cmap="gray_r", vmin=0, vmax=1, interpolation="nearest")
         plt.colorbar(label="x_np == 0 (0/1)")
         plt.xlabel("Hidden dimension")
@@ -129,7 +129,7 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
     block_path = save_path.with_name(save_path.stem + "_c0-63.png")
     _plot_and_save(x_np[:, :block_cols], block_path, title_suffix=f"Columns 0-{block_cols-1}")
     block_path_ = save_path.with_name(save_path.stem + "_r0-63_c0-63.png")
-    _plot_and_save(x_np[:block_rows, :block_cols], block_path_, title_suffix=f"Row 0-{block_rows-1}, Columns 0-{block_cols-1}", height=6)
+    _plot_and_save(x_np[:block_rows, :block_cols], block_path_, title_suffix=f"Row 0-{block_rows-1}, Columns 0-{block_cols-1}", height=8)
     mask_block_path = save_path.with_name(save_path.stem + "_mask_xeq0_c0-63.png")
     _plot_mask_and_save(x0_mask[:, :block_cols], mask_block_path, title_suffix=f"Columns 0-{block_cols-1}")
     mask_block_path_ = save_path.with_name(save_path.stem + "_mask_xeq0_r0-63_c0-63.png")
@@ -137,6 +137,7 @@ def _build_heatmap(x: torch.Tensor, save_path: Path, logger):
         x0_mask[:block_rows, :block_cols],
         mask_block_path_,
         title_suffix=f"Row 0-{block_rows-1}, Columns 0-{block_cols-1}",
+        height=8
     )
 
 def _register_obs_hook(model, args, logger):

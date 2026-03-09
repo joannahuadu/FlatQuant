@@ -69,8 +69,8 @@ def configure_x_mask_token_gate(
     else:
         raise ValueError(f"Unknown x_mask_token_gate_mode: {x_mask_token_gate_mode}")
 
-    shared_mlp = None
     for idx in range(num_layers):
+        shared_mlp = None
         layer = model.model.layers[idx]
         for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
             if trans is None or not hasattr(trans, "x_mask_token_gate_enabled"):
@@ -203,6 +203,105 @@ def reparameterize_model(
             reparameterize_ln(layer.post_attention_layernorm, layer.mlp.up_gate_trans)
     return model
 
+def reparameterize_ori_model(
+    model,
+    use_x_perm=False,
+    use_perm=False,
+    use_comp_mask=False,
+    use_x_mask=False,
+    use_x_mask_comp=False,
+    use_x_mask_fixed=False,
+    x_mask_mode="hard_fixed",
+    x_mask_tau=1.0,
+    x_mask_r_thr=None,
+    x_mask_r_mode="top2",
+    x_mask_track_err=False,
+    x_mask_key_ratio=None,
+    x_mask_key_k=None,
+    use_x_perm_predictor=False,
+    x_perm_num_clusters=4,
+    x_perm_pred_hidden=128,
+):
+    for idx in range(model.config.num_hidden_layers):
+        layer = model.model.layers[idx]
+        if layer.self_attn.ln_trans is not None:
+            layer.self_attn.ln_trans._eval_mode = True
+            layer.self_attn.ln_trans.use_x_perm = use_x_perm
+            layer.self_attn.ln_trans.use_perm = use_perm
+            layer.self_attn.ln_trans.use_comp_mask = use_comp_mask
+            layer.self_attn.ln_trans.use_x_mask = use_x_mask
+            layer.self_attn.ln_trans.use_x_mask_comp = use_x_mask_comp
+            layer.self_attn.ln_trans.use_x_mask_fixed = use_x_mask_fixed
+            layer.self_attn.ln_trans.x_mask_mode = x_mask_mode
+            layer.self_attn.ln_trans.x_mask_tau = x_mask_tau
+            layer.self_attn.ln_trans.x_mask_r_thr = x_mask_r_thr
+            layer.self_attn.ln_trans.x_mask_r_mode = x_mask_r_mode
+            layer.self_attn.ln_trans.x_mask_track_err = x_mask_track_err or x_mask_key_ratio is not None or x_mask_key_k is not None
+            layer.self_attn.ln_trans.x_mask_key_ratio = x_mask_key_ratio
+            layer.self_attn.ln_trans.x_mask_key_k = x_mask_key_k
+            layer.self_attn.ln_trans.use_x_perm_predictor = use_x_perm_predictor
+            if use_x_perm_predictor and layer.self_attn.ln_trans.x_perm_predictor is None:
+                trans = layer.self_attn.ln_trans
+                num_blocks = trans.hidden_dim // trans.block_size
+                trans._build_x_perm_predictor(
+                    num_blocks=num_blocks,
+                    block_size=trans.block_size,
+                    num_clusters=x_perm_num_clusters,
+                    hidden_size=x_perm_pred_hidden,
+                )
+        if layer.mlp.up_gate_trans is not None:
+            layer.mlp.up_gate_trans._eval_mode = True
+            layer.mlp.up_gate_trans.use_x_perm = use_x_perm
+            layer.mlp.up_gate_trans.use_perm = use_perm
+            layer.mlp.up_gate_trans.use_comp_mask = use_comp_mask
+            layer.mlp.up_gate_trans.use_x_mask = use_x_mask
+            layer.mlp.up_gate_trans.use_x_mask_comp = use_x_mask_comp
+            layer.mlp.up_gate_trans.use_x_mask_fixed = use_x_mask_fixed
+            layer.mlp.up_gate_trans.x_mask_mode = x_mask_mode
+            layer.mlp.up_gate_trans.x_mask_tau = x_mask_tau
+            layer.mlp.up_gate_trans.x_mask_r_thr = x_mask_r_thr
+            layer.mlp.up_gate_trans.x_mask_r_mode = x_mask_r_mode
+            layer.mlp.up_gate_trans.x_mask_track_err = x_mask_track_err or x_mask_key_ratio is not None or x_mask_key_k is not None
+            layer.mlp.up_gate_trans.x_mask_key_ratio = x_mask_key_ratio
+            layer.mlp.up_gate_trans.x_mask_key_k = x_mask_key_k
+            layer.mlp.up_gate_trans.use_x_perm_predictor = use_x_perm_predictor
+            if use_x_perm_predictor and layer.mlp.up_gate_trans.x_perm_predictor is None:
+                trans = layer.mlp.up_gate_trans
+                num_blocks = trans.hidden_dim // trans.block_size
+                trans._build_x_perm_predictor(
+                    num_blocks=num_blocks,
+                    block_size=trans.block_size,
+                    num_clusters=x_perm_num_clusters,
+                    hidden_size=x_perm_pred_hidden,
+                )
+        if layer.mlp.down_trans is not None:
+            layer.mlp.down_trans._eval_mode = True
+            layer.mlp.down_trans.use_x_perm = use_x_perm
+            layer.mlp.down_trans.use_perm = use_perm
+            layer.mlp.down_trans.use_comp_mask = use_comp_mask
+            layer.mlp.down_trans.use_x_mask = use_x_mask
+            layer.mlp.down_trans.use_x_mask_comp = use_x_mask_comp
+            layer.mlp.down_trans.use_x_mask_fixed = use_x_mask_fixed
+            layer.mlp.down_trans.x_mask_mode = x_mask_mode
+            layer.mlp.down_trans.x_mask_tau = x_mask_tau
+            layer.mlp.down_trans.x_mask_r_thr = x_mask_r_thr
+            layer.mlp.down_trans.x_mask_r_mode = x_mask_r_mode
+            layer.mlp.down_trans.x_mask_track_err = x_mask_track_err or x_mask_key_ratio is not None or x_mask_key_k is not None
+            layer.mlp.down_trans.x_mask_key_ratio = x_mask_key_ratio
+            layer.mlp.down_trans.x_mask_key_k = x_mask_key_k
+            layer.mlp.down_trans.use_x_perm_predictor = use_x_perm_predictor
+            if use_x_perm_predictor and layer.mlp.down_trans.x_perm_predictor is None:
+                trans = layer.mlp.down_trans
+                num_blocks = trans.hidden_dim // trans.block_size
+                trans._build_x_perm_predictor(
+                    num_blocks=num_blocks,
+                    block_size=trans.block_size,
+                    num_clusters=x_perm_num_clusters,
+                    hidden_size=x_perm_pred_hidden,
+                )
+        layer.self_attn._ori_mode = True
+        layer.mlp._ori_mode = True
+    return model
 
 def save_parametrized_checkpoint(model, args):
     quanted_parameters = {}

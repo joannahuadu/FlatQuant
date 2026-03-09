@@ -2,7 +2,8 @@ import torch
 import matplotlib.pyplot as plt
 import os
 
-a = torch.load("./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260304_174744/flat_parameters.pth")
+a = torch.load("./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260304_174643/flat_matrices.pth")
+# b = torch.load("./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w16a16/exp_20260304_174643/flat_matrices.pth")
 # b = torch.load("./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260215_014049/flat_matrices.pth")
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260202_003601/flat_matrices.pth
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260208_004512/flat_matrices.pth use_perm 4dim
@@ -10,12 +11,15 @@ a = torch.load("./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_2026
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260207_233015/flat_matrices.pth" no use perm 4dim
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260208_144923/flat_matrices.pth  2dim_new
 # ./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w4a4/exp_20260204_195112/flat_matrices.pth  2dim
-# print(len(a[0].keys()))
+print(a[0].keys())
 # print(len(b[0].keys()))
 for i in range(32):
     for key, value in a[i].items():
         if 'x_mask_token_mlp' in key:
             print(key, value)
+            # print(b[i][key])
+            # b[i][key] = value
+# torch.save(b, "./outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/w16a16/exp_20260305_155833/flat_matrices_updated.pth")  
 # for i in range(32):
 #     for key, value in a[i].items():
 #         if 'x_mask_comp' in key:
