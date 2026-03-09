@@ -1,4 +1,6 @@
 import json
+import os
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -322,72 +324,108 @@ def main():
         utils.distribute_model(model)
     else:
         model.to(utils.DEV)
+
+    softmax_stats = None
+    if getattr(args, "softmax_stats", False):
+        from flatquant.softmax_stats import SoftmaxStatsCollector, SoftmaxStatsConfig
+
+        softmax_stats = SoftmaxStatsCollector(
+            SoftmaxStatsConfig(
+                sample_per_call=int(getattr(args, "softmax_stats_sample", 262144)),
+                max_calls=int(getattr(args, "softmax_stats_max_calls", 0)),
+                bins_linear=int(getattr(args, "softmax_stats_bins", 200)),
+                bins_log10=int(getattr(args, "softmax_stats_log_bins", 240)),
+                log10_min=float(getattr(args, "softmax_stats_log_min", -12.0)),
+                only_last_dim_min=int(getattr(args, "softmax_stats_min_kv", 16)),
+            ),
+            logger=logger,
+        )
+        logger.info(
+            "[softmax_stats] enabled: "
+            f"sample_per_call={softmax_stats.config.sample_per_call}, "
+            f"max_calls={softmax_stats.config.max_calls}, "
+            f"bins={softmax_stats.config.bins_linear}, "
+            f"log_bins={softmax_stats.config.bins_log10}, "
+            f"log10_min={softmax_stats.config.log10_min}"
+        )
     
-    # Evaluating PPL
-    for eval_dataset in ["wikitext2"]:
-        logger.info(eval_dataset)
-        testloader = data_utils.get_loaders(
-                args,
-                eval_dataset,
-                tokenizer,
-                seqlen=model.seqlen,
-                eval_mode=True
+    softmax_ctx = softmax_stats.patch() if softmax_stats is not None else nullcontext()
+    with softmax_ctx:
+        # Evaluating PPL
+        for eval_dataset in ["wikitext2"]:
+            logger.info(eval_dataset)
+            testloader = data_utils.get_loaders(
+                    args,
+                    eval_dataset,
+                    tokenizer,
+                    seqlen=model.seqlen,
+                    eval_mode=True
+                )
+            dataset_ppl = eval_utils.ppl_eval(model, testloader)
+            logger.info(dataset_ppl)
+
+        if args.lm_eval:
+            import lm_eval
+            from lm_eval import utils as lm_eval_utils
+            from lm_eval.models.huggingface import HFLM
+            from lm_eval.tasks import initialize_tasks
+            initialize_tasks()
+
+            hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
+
+            task_names = lm_eval_utils.pattern_match(args.tasks, lm_eval.tasks.ALL_TASKS)
+            results = lm_eval.simple_evaluate(
+                hflm,
+                tasks=task_names,
+                num_fewshot=args.num_fewshot,
+                batch_size=args.lm_eval_batch_size,
             )
-        dataset_ppl = eval_utils.ppl_eval(model, testloader)
-        logger.info(dataset_ppl)
+
+            results_by_task = results.get("results", {})
+            print("\n" + "=" * 60)
+            print("Evaluation Results")
+            print("=" * 60)
+            for task, metrics in results_by_task.items():
+                print(f"\n{task}:")
+                for k, v in metrics.items():
+                    if "stderr" not in k:
+                        print(f"  {k}: {v}")
+
+            print("\n" + "=" * 60)
+            print("Summary")
+            print("=" * 60)
+            summary_metrics = {}
+            for task, metrics in results_by_task.items():
+                for k, v in metrics.items():
+                    if "stderr" in k:
+                        continue
+                    if k.endswith("/acc") or "acc" in k.lower():
+                        key = f"{task} {k}"
+                        summary_metrics[key] = v
+                        print(f"{key}: {v}")
+
+            if hasattr(args, "wandb") and args.wandb and summary_metrics:
+                import wandb
+                wandb.log(summary_metrics)
+
+            if args.output_file:
+                output_path = Path(args.output_file)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                with output_path.open("w") as f:
+                    json.dump(results_by_task, f, indent=2)
+                print(f"\nResults saved to {args.output_file}")
+
+    if softmax_stats is not None:
+        save_prefix = (
+            args.softmax_stats_save_path
+            if getattr(args, "softmax_stats_save_path", None)
+            else os.path.join(args.exp_dir, "softmax_stats")
+        )
+        pt_path, json_path = softmax_stats.save(save_prefix)
+        logger.info(f"[softmax_stats] saved: {pt_path} / {json_path}")
 
     if not args.lm_eval:
         return
-
-    import lm_eval
-    from lm_eval import utils as lm_eval_utils
-    from lm_eval.models.huggingface import HFLM
-    from lm_eval.tasks import initialize_tasks
-    initialize_tasks()
-
-    hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
-
-    task_names = lm_eval_utils.pattern_match(args.tasks, lm_eval.tasks.ALL_TASKS)
-    results = lm_eval.simple_evaluate(
-        hflm,
-        tasks=task_names,
-        num_fewshot=args.num_fewshot,
-        batch_size=args.lm_eval_batch_size,
-    )
-
-    results_by_task = results.get("results", {})
-    print("\n" + "=" * 60)
-    print("Evaluation Results")
-    print("=" * 60)
-    for task, metrics in results_by_task.items():
-        print(f"\n{task}:")
-        for k, v in metrics.items():
-            if "stderr" not in k:
-                print(f"  {k}: {v}")
-
-    print("\n" + "=" * 60)
-    print("Summary")
-    print("=" * 60)
-    summary_metrics = {}
-    for task, metrics in results_by_task.items():
-        for k, v in metrics.items():
-            if "stderr" in k:
-                continue
-            if k.endswith("/acc") or "acc" in k.lower():
-                key = f"{task} {k}"
-                summary_metrics[key] = v
-                print(f"{key}: {v}")
-
-    if hasattr(args, "wandb") and args.wandb and summary_metrics:
-        import wandb
-        wandb.log(summary_metrics)
-
-    if args.output_file:
-        output_path = Path(args.output_file)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with output_path.open("w") as f:
-            json.dump(results_by_task, f, indent=2)
-        print(f"\nResults saved to {args.output_file}")
 
 
 if __name__ == '__main__':

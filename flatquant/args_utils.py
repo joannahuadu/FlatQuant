@@ -305,6 +305,24 @@ def parser_gen():
     parser.add_argument('--obs_save_path', type=str, default=None,
                         help='Optional path to save the generated heatmap image. Defaults to <exp_dir>/obs_heatmap.png')
 
+    # Softmax statistics (attention softmax distribution)
+    parser.add_argument('--softmax_stats', action='store_true', default=False,
+                        help='Collect attention softmax statistics (histograms) during evaluation.')
+    parser.add_argument('--softmax_stats_sample', type=int, default=262144,
+                        help='Max number of softmax probabilities to sample per softmax call.')
+    parser.add_argument('--softmax_stats_max_calls', type=int, default=0,
+                        help='If >0, stop collecting after this many softmax calls.')
+    parser.add_argument('--softmax_stats_bins', type=int, default=200,
+                        help='Number of bins for linear histogram in [0, 1].')
+    parser.add_argument('--softmax_stats_log_bins', type=int, default=240,
+                        help='Number of bins for log10 histogram in [log10_min, 0].')
+    parser.add_argument('--softmax_stats_log_min', type=float, default=-12.0,
+                        help='Lower bound for log10 histogram (e.g., -12 means clamp at 1e-12).')
+    parser.add_argument('--softmax_stats_min_kv', type=int, default=16,
+                        help='Only record softmax whose last dimension >= this (filters non-attention softmax).')
+    parser.add_argument('--softmax_stats_save_path', type=str, default=None,
+                        help='Optional save prefix for softmax stats (.pt/.json). Default: <exp_dir>/softmax_stats')
+
     args = parser.parse_args()
     if args.a_groupsize > -1:
         raise NotImplementedError
