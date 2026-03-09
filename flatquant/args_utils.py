@@ -320,6 +320,10 @@ def parser_gen():
                         help='Lower bound for log10 histogram (e.g., -12 means clamp at 1e-12).')
     parser.add_argument('--softmax_stats_min_kv', type=int, default=16,
                         help='Only record softmax whose last dimension >= this (filters non-attention softmax).')
+    parser.add_argument('--softmax_stats_entropy_rows', type=int, default=8192,
+                        help='Max number of attention rows to sample per softmax call for entropy computation.')
+    parser.add_argument('--softmax_stats_entropy_bins', type=int, default=200,
+                        help='Number of bins for normalized entropy histogram in [0, 1].')
     parser.add_argument('--softmax_stats_save_path', type=str, default=None,
                         help='Optional save prefix for softmax stats (.pt/.json). Default: <exp_dir>/softmax_stats')
 

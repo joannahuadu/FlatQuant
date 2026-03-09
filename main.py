@@ -171,6 +171,8 @@ def main():
                 bins_log10=int(getattr(args, "softmax_stats_log_bins", 240)),
                 log10_min=float(getattr(args, "softmax_stats_log_min", -12.0)),
                 only_last_dim_min=int(getattr(args, "softmax_stats_min_kv", 16)),
+                entropy_rows_per_call=int(getattr(args, "softmax_stats_entropy_rows", 8192)),
+                entropy_bins=int(getattr(args, "softmax_stats_entropy_bins", 200)),
             ),
             logger=logger,
         )
