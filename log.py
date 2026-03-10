@@ -16,11 +16,13 @@ from flatquant.flat_linear import FlatQuantizedLinear
 
 
 class SoftmaxStatsScope:
-    def __init__(self, args, logger) -> None:
+    def __init__(self, args, logger, model=None) -> None:
         self.args = args
         self.logger = logger
+        self.model = model
         self.softmax_stats = None
         self._ctx = nullcontext()
+        self._layer_hook_handles = []
 
         if not getattr(args, "softmax_stats", False):
             return
@@ -37,6 +39,10 @@ class SoftmaxStatsScope:
                 only_last_dim_min=int(getattr(args, "softmax_stats_min_kv", 16)),
                 entropy_rows_per_call=int(getattr(args, "softmax_stats_entropy_rows", 8192)),
                 entropy_bins=int(getattr(args, "softmax_stats_entropy_bins", 200)),
+                per_layer=bool(getattr(args, "softmax_stats_per_layer", False)),
+                per_head=bool(getattr(args, "softmax_stats_per_head", False)),
+                head_dim=int(getattr(args, "softmax_stats_head_dim", 1)),
+                row_std_rows_per_call=int(getattr(args, "softmax_stats_row_std_rows", 2048)),
             ),
             logger=logger,
         )
@@ -50,14 +56,63 @@ class SoftmaxStatsScope:
             f"log_bins={self.softmax_stats.config.bins_log10}, "
             f"log10_min={self.softmax_stats.config.log10_min}, "
             f"entropy_rows={self.softmax_stats.config.entropy_rows_per_call}, "
-            f"entropy_bins={self.softmax_stats.config.entropy_bins}"
+            f"entropy_bins={self.softmax_stats.config.entropy_bins}, "
+            f"per_layer={self.softmax_stats.config.per_layer}, "
+            f"per_head={self.softmax_stats.config.per_head}, "
+            f"head_dim={self.softmax_stats.config.head_dim}, "
+            f"row_std_rows={self.softmax_stats.config.row_std_rows_per_call}"
         )
+
+    def _install_layer_hooks(self) -> None:
+        if not (
+            self.softmax_stats
+            and (self.softmax_stats.config.per_layer or self.softmax_stats.config.per_head)
+        ):
+            return
+        model = self.model
+        if model is None:
+            self.logger.warning("[softmax_stats] per-layer/per-head requested but model is None; skip layer hooks.")
+            return
+        if hasattr(model, "module"):
+            model = model.module
+        layers = None
+        if hasattr(model, "model") and hasattr(model.model, "layers"):
+            layers = model.model.layers
+        elif hasattr(model, "layers"):
+            layers = model.layers
+        if layers is None:
+            self.logger.warning("[softmax_stats] per-layer/per-head requested but could not find model.layers; skip layer hooks.")
+            return
+
+        collector = self.softmax_stats
+
+        def make_pre(i: int):
+            def _pre(_module, _inputs):
+                collector.push_layer(i)
+            return _pre
+
+        def make_post(_i: int):
+            def _post(_module, _inputs, _output):
+                collector.pop_layer()
+            return _post
+
+        for i, layer in enumerate(layers):
+            self._layer_hook_handles.append(layer.register_forward_pre_hook(make_pre(i)))
+            self._layer_hook_handles.append(layer.register_forward_hook(make_post(i)))
+        self.logger.info(f"[softmax_stats] layer context enabled on {len(layers)} layers.")
 
     def __enter__(self):
         self._ctx.__enter__()
+        self._install_layer_hooks()
         return self.softmax_stats
 
     def __exit__(self, exc_type, exc, tb):
+        for h in self._layer_hook_handles:
+            try:
+                h.remove()
+            except Exception:
+                pass
+        self._layer_hook_handles = []
         suppress = self._ctx.__exit__(exc_type, exc, tb)
         if exc_type is None and self.softmax_stats is not None:
             save_prefix = (
@@ -341,7 +396,7 @@ def main():
     # register observation hook after model moves to device
     _register_log_hooks(model, logger, args)
 
-    with SoftmaxStatsScope(args, logger):
+    with SoftmaxStatsScope(args, logger, model=model):
         # Evaluating PPL on WikiText-2
         for eval_dataset in ["wikitext2"]:
             logger.info(eval_dataset)
