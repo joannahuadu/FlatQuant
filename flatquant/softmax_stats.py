@@ -28,6 +28,10 @@ class SoftmaxStatsConfig:
     only_last_dim_min: int = 16
     entropy_rows_per_call: int = 8_192
     entropy_bins: int = 200
+    per_layer: bool = False
+    per_head: bool = False
+    head_dim: int = 1
+    row_std_rows_per_call: int = 2_048
 
 
 class SoftmaxStatsCollector:
@@ -73,8 +77,32 @@ class SoftmaxStatsCollector:
         self.entropy_norm_counts = torch.zeros(self.config.entropy_bins, dtype=torch.int64)
         self._entropy_norm_lt_counts = [0] * len(NORM_ENTROPY_LT_THRESHOLDS)
 
+        self._current_layer: int | None = None
+        self._layer_stack: list[int | None] = []
+
+        self.entropy_norm_by_layer_n: dict[int, int] = {}
+        self.entropy_norm_by_layer_sum: dict[int, float] = {}
+        self.entropy_norm_by_layer_sumsq: dict[int, float] = {}
+        self.entropy_norm_by_layer_min: dict[int, float] = {}
+        self.entropy_norm_by_layer_max: dict[int, float] = {}
+        self.entropy_norm_counts_by_layer: dict[int, torch.Tensor] = {}
+        self.entropy_norm_lt_counts_by_layer: dict[int, list[int]] = {}
+
+        self.row_std_by_layer_head_n: dict[int, list[int]] = {}
+        self.row_std_by_layer_head_sum: dict[int, list[float]] = {}
+        self.row_std_by_layer_head_sumsq: dict[int, list[float]] = {}
+        self.row_std_by_layer_head_min: dict[int, list[float]] = {}
+        self.row_std_by_layer_head_max: dict[int, list[float]] = {}
+
         self._orig_torch_softmax = None
         self._orig_tensor_softmax = None
+
+    def push_layer(self, layer_idx: int) -> None:
+        self._layer_stack.append(self._current_layer)
+        self._current_layer = int(layer_idx)
+
+    def pop_layer(self) -> None:
+        self._current_layer = self._layer_stack.pop() if self._layer_stack else None
 
     def _should_record(self, out: torch.Tensor, dim: int) -> bool:
         if not torch.is_tensor(out):
@@ -88,6 +116,58 @@ class SoftmaxStatsCollector:
         if self.config.max_calls > 0 and self.n_calls >= self.config.max_calls:
             return False
         return True
+
+    def _update_entropy_norm_by_layer(self, layer: int, ent_norm: torch.Tensor) -> None:
+        if ent_norm.numel() == 0:
+            return
+
+        layer = int(layer)
+        n = int(ent_norm.numel())
+        s = float(ent_norm.sum().item())
+        ss = float((ent_norm * ent_norm).sum().item())
+        mn = float(ent_norm.min().item())
+        mx = float(ent_norm.max().item())
+
+        self.entropy_norm_by_layer_n[layer] = self.entropy_norm_by_layer_n.get(layer, 0) + n
+        self.entropy_norm_by_layer_sum[layer] = self.entropy_norm_by_layer_sum.get(layer, 0.0) + s
+        self.entropy_norm_by_layer_sumsq[layer] = self.entropy_norm_by_layer_sumsq.get(layer, 0.0) + ss
+        self.entropy_norm_by_layer_min[layer] = min(self.entropy_norm_by_layer_min.get(layer, math.inf), mn)
+        self.entropy_norm_by_layer_max[layer] = max(self.entropy_norm_by_layer_max.get(layer, -math.inf), mx)
+
+        hist = torch.histc(ent_norm, bins=self.config.entropy_bins, min=0.0, max=1.0).to(dtype=torch.int64).cpu()
+        if layer in self.entropy_norm_counts_by_layer:
+            self.entropy_norm_counts_by_layer[layer] += hist
+        else:
+            self.entropy_norm_counts_by_layer[layer] = hist
+
+        lt_counts = self.entropy_norm_lt_counts_by_layer.get(layer)
+        if lt_counts is None:
+            lt_counts = [0] * len(NORM_ENTROPY_LT_THRESHOLDS)
+            self.entropy_norm_lt_counts_by_layer[layer] = lt_counts
+        for i, thr in enumerate(NORM_ENTROPY_LT_THRESHOLDS):
+            lt_counts[i] += int((ent_norm < thr).sum().item())
+
+    def _ensure_row_std_buffers(self, layer: int, n_heads: int) -> None:
+        layer = int(layer)
+        n_heads = int(n_heads)
+        if n_heads <= 0:
+            return
+        if layer not in self.row_std_by_layer_head_n:
+            self.row_std_by_layer_head_n[layer] = [0] * n_heads
+            self.row_std_by_layer_head_sum[layer] = [0.0] * n_heads
+            self.row_std_by_layer_head_sumsq[layer] = [0.0] * n_heads
+            self.row_std_by_layer_head_min[layer] = [math.inf] * n_heads
+            self.row_std_by_layer_head_max[layer] = [-math.inf] * n_heads
+            return
+
+        cur = len(self.row_std_by_layer_head_n[layer])
+        if n_heads > cur:
+            extra = n_heads - cur
+            self.row_std_by_layer_head_n[layer].extend([0] * extra)
+            self.row_std_by_layer_head_sum[layer].extend([0.0] * extra)
+            self.row_std_by_layer_head_sumsq[layer].extend([0.0] * extra)
+            self.row_std_by_layer_head_min[layer].extend([math.inf] * extra)
+            self.row_std_by_layer_head_max[layer].extend([-math.inf] * extra)
 
     @torch.no_grad()
     def observe(self, out: torch.Tensor, *, dim: int) -> None:
@@ -160,40 +240,120 @@ class SoftmaxStatsCollector:
             for i, thr in enumerate(ROW_MAX_GT_THRESHOLDS):
                 self._row_max_gt_counts[i] += int((row_max > thr).sum().item())
 
-        # Per-row entropy (normalized to [0, 1] by dividing log(KV))
-        if self.config.entropy_rows_per_call > 0 and out.shape[-1] > 1:
+        need_entropy = self.config.entropy_rows_per_call > 0 and out.shape[-1] > 1
+        need_row_std = (
+            self.config.per_head
+            and self.config.row_std_rows_per_call > 0
+            and self._current_layer is not None
+            and out.dim() == 4
+            and out.shape[-1] > 1
+        )
+
+        # Per-row entropy (normalized) and/or per-layer-per-head row-wise std.
+        if need_entropy or need_row_std:
             rows = out.detach().reshape(-1, out.shape[-1])
             if rows.numel():
                 total_rows = int(rows.shape[0])
-                n_rows = min(int(self.config.entropy_rows_per_call), total_rows)
-                if n_rows < total_rows:
-                    ridx = torch.randint(0, total_rows, (n_rows,), device=rows.device)
-                    rows_s = rows[ridx]
+                max_rows = 0
+                if need_entropy:
+                    max_rows = max(max_rows, int(self.config.entropy_rows_per_call))
+                if need_row_std:
+                    max_rows = max(max_rows, int(self.config.row_std_rows_per_call))
+                max_rows = min(max_rows, total_rows)
+                if max_rows < total_rows:
+                    ridx_all = torch.randint(0, total_rows, (max_rows,), device=rows.device)
+                    rows_all = rows[ridx_all]
                 else:
-                    rows_s = rows
+                    ridx_all = None
+                    rows_all = rows
 
-                p = rows_s.float().clamp_min(0.0)
-                ent = -(p * (p + self.config.eps).log()).sum(dim=-1)
-                ent = ent[torch.isfinite(ent)]
-                if ent.numel():
-                    self.entropy_n += int(ent.numel())
-                    self.entropy_sum += float(ent.sum().item())
-                    self.entropy_sumsq += float((ent * ent).sum().item())
-                    self.entropy_min = min(self.entropy_min, float(ent.min().item()))
-                    self.entropy_max = max(self.entropy_max, float(ent.max().item()))
+                if need_entropy:
+                    n_ent = min(int(self.config.entropy_rows_per_call), int(rows_all.shape[0]))
+                    rows_s = rows_all[:n_ent]
+                    p = rows_s.float().clamp_min(0.0)
+                    ent = -(p * (p + self.config.eps).log()).sum(dim=-1)
+                    ent = ent[torch.isfinite(ent)]
+                    if ent.numel():
+                        self.entropy_n += int(ent.numel())
+                        self.entropy_sum += float(ent.sum().item())
+                        self.entropy_sumsq += float((ent * ent).sum().item())
+                        self.entropy_min = min(self.entropy_min, float(ent.min().item()))
+                        self.entropy_max = max(self.entropy_max, float(ent.max().item()))
 
-                    denom = math.log(int(out.shape[-1]))
-                    if denom > 0:
-                        ent_norm = (ent / denom).clamp_(0.0, 1.0)
-                        self.entropy_norm_n += int(ent_norm.numel())
-                        self.entropy_norm_sum += float(ent_norm.sum().item())
-                        self.entropy_norm_sumsq += float((ent_norm * ent_norm).sum().item())
-                        self.entropy_norm_min = min(self.entropy_norm_min, float(ent_norm.min().item()))
-                        self.entropy_norm_max = max(self.entropy_norm_max, float(ent_norm.max().item()))
-                        ehist = torch.histc(ent_norm, bins=self.config.entropy_bins, min=0.0, max=1.0)
-                        self.entropy_norm_counts += ehist.to(dtype=torch.int64).cpu()
-                        for i, thr in enumerate(NORM_ENTROPY_LT_THRESHOLDS):
-                            self._entropy_norm_lt_counts[i] += int((ent_norm < thr).sum().item())
+                        denom = math.log(int(out.shape[-1]))
+                        if denom > 0:
+                            ent_norm = (ent / denom).clamp_(0.0, 1.0)
+                            self.entropy_norm_n += int(ent_norm.numel())
+                            self.entropy_norm_sum += float(ent_norm.sum().item())
+                            self.entropy_norm_sumsq += float((ent_norm * ent_norm).sum().item())
+                            self.entropy_norm_min = min(self.entropy_norm_min, float(ent_norm.min().item()))
+                            self.entropy_norm_max = max(self.entropy_norm_max, float(ent_norm.max().item()))
+                            ehist = torch.histc(ent_norm, bins=self.config.entropy_bins, min=0.0, max=1.0)
+                            self.entropy_norm_counts += ehist.to(dtype=torch.int64).cpu()
+                            for i, thr in enumerate(NORM_ENTROPY_LT_THRESHOLDS):
+                                self._entropy_norm_lt_counts[i] += int((ent_norm < thr).sum().item())
+                            if self.config.per_layer and self._current_layer is not None:
+                                self._update_entropy_norm_by_layer(self._current_layer, ent_norm)
+
+                if need_row_std:
+                    n_rs = min(int(self.config.row_std_rows_per_call), int(rows_all.shape[0]))
+                    rows_r = rows_all[:n_rs]
+                    p_r = rows_r.float().clamp_min(0.0)
+                    row_std = p_r.std(dim=-1, unbiased=False)
+                    finite = torch.isfinite(row_std)
+                    if not finite.all():
+                        row_std = row_std[finite]
+                        if ridx_all is not None:
+                            ridx_r = ridx_all[:n_rs][finite]
+                        else:
+                            ridx_r = torch.arange(n_rs, device=rows.device)[finite]
+                    else:
+                        ridx_r = ridx_all[:n_rs] if ridx_all is not None else torch.arange(n_rs, device=rows.device)
+
+                    if row_std.numel():
+                        head_dim = int(self.config.head_dim) % int(out.dim())
+                        if head_dim == out.dim() - 1:
+                            head_dim = -1
+                        if head_dim in (0, 1, 2):
+                            d0, d1, d2 = (int(out.shape[0]), int(out.shape[1]), int(out.shape[2]))
+                            if head_dim == 0:
+                                denom = d1 * d2
+                                head_ids = ridx_r // max(denom, 1)
+                                n_heads = d0
+                            elif head_dim == 1:
+                                head_ids = (ridx_r // max(d2, 1)) % max(d1, 1)
+                                n_heads = d1
+                            else:
+                                head_ids = ridx_r % max(d2, 1)
+                                n_heads = d2
+
+                            if n_heads > 0:
+                                head_ids_c = head_ids.to(device="cpu", dtype=torch.int64)
+                                row_std_c = row_std.to(device="cpu", dtype=torch.float32)
+                                n_per_head = torch.bincount(head_ids_c, minlength=int(n_heads))
+                                sum_per_head = torch.bincount(head_ids_c, weights=row_std_c, minlength=int(n_heads))
+                                sumsq_per_head = torch.bincount(
+                                    head_ids_c, weights=row_std_c * row_std_c, minlength=int(n_heads)
+                                )
+
+                                layer = int(self._current_layer)
+                                self._ensure_row_std_buffers(layer, int(n_heads))
+                                n_buf = self.row_std_by_layer_head_n[layer]
+                                sum_buf = self.row_std_by_layer_head_sum[layer]
+                                sumsq_buf = self.row_std_by_layer_head_sumsq[layer]
+                                min_buf = self.row_std_by_layer_head_min[layer]
+                                max_buf = self.row_std_by_layer_head_max[layer]
+                                for h in range(int(n_heads)):
+                                    nh = int(n_per_head[h].item())
+                                    if nh <= 0:
+                                        continue
+                                    n_buf[h] += nh
+                                    sum_buf[h] += float(sum_per_head[h].item())
+                                    sumsq_buf[h] += float(sumsq_per_head[h].item())
+                                    vals_h = row_std_c[head_ids_c == h]
+                                    if vals_h.numel():
+                                        min_buf[h] = min(min_buf[h], float(vals_h.min().item()))
+                                        max_buf[h] = max(max_buf[h], float(vals_h.max().item()))
 
         if self.logger and (self.n_calls == 1 or (self.n_calls % 200 == 0)):
             row_max_mean = self.row_max_sum / max(self.row_max_n, 1)
@@ -282,16 +442,69 @@ class SoftmaxStatsCollector:
                 "only_last_dim_min": self.config.only_last_dim_min,
                 "entropy_rows_per_call": self.config.entropy_rows_per_call,
                 "entropy_bins": self.config.entropy_bins,
+                "per_layer": self.config.per_layer,
+                "per_head": self.config.per_head,
+                "head_dim": self.config.head_dim,
+                "row_std_rows_per_call": self.config.row_std_rows_per_call,
             },
         }
 
     def state_dict(self) -> dict[str, Any]:
+        entropy_norm_by_layer_summary: dict[str, Any] = {}
+        if self.config.per_layer and self.entropy_norm_by_layer_n:
+            for layer in sorted(self.entropy_norm_by_layer_n):
+                n = max(int(self.entropy_norm_by_layer_n[layer]), 1)
+                mean = float(self.entropy_norm_by_layer_sum[layer]) / n
+                var = max(float(self.entropy_norm_by_layer_sumsq[layer]) / n - mean * mean, 0.0)
+                std = math.sqrt(var)
+                lt_counts = self.entropy_norm_lt_counts_by_layer.get(layer) or [0] * len(NORM_ENTROPY_LT_THRESHOLDS)
+                entropy_norm_by_layer_summary[str(layer)] = {
+                    "n": int(self.entropy_norm_by_layer_n[layer]),
+                    "min": None
+                    if not math.isfinite(self.entropy_norm_by_layer_min.get(layer, math.inf))
+                    else float(self.entropy_norm_by_layer_min[layer]),
+                    "max": None
+                    if not math.isfinite(self.entropy_norm_by_layer_max.get(layer, -math.inf))
+                    else float(self.entropy_norm_by_layer_max[layer]),
+                    "mean": mean,
+                    "std": std,
+                    "lt_thresholds": list(NORM_ENTROPY_LT_THRESHOLDS),
+                    "lt_ratio": [c / n for c in lt_counts],
+                }
+        row_std_by_layer_head_summary: dict[str, Any] = {}
+        if self.config.per_head and self.row_std_by_layer_head_n:
+            for layer in sorted(self.row_std_by_layer_head_n):
+                n_list = self.row_std_by_layer_head_n[layer]
+                sum_list = self.row_std_by_layer_head_sum[layer]
+                sumsq_list = self.row_std_by_layer_head_sumsq[layer]
+                min_list = self.row_std_by_layer_head_min[layer]
+                max_list = self.row_std_by_layer_head_max[layer]
+                heads: dict[str, Any] = {}
+                for h in range(len(n_list)):
+                    n = int(n_list[h])
+                    if n <= 0:
+                        continue
+                    mean = float(sum_list[h]) / n
+                    var = max(float(sumsq_list[h]) / n - mean * mean, 0.0)
+                    std = math.sqrt(var)
+                    heads[str(h)] = {
+                        "n": n,
+                        "min": None if not math.isfinite(min_list[h]) else float(min_list[h]),
+                        "max": None if not math.isfinite(max_list[h]) else float(max_list[h]),
+                        "mean": mean,
+                        "std": std,
+                    }
+                if heads:
+                    row_std_by_layer_head_summary[str(layer)] = heads
         return {
             "summary": self.summary(),
             "linear_counts": self.linear_counts,
             "log10_counts": self.log10_counts,
             "max_linear_counts": self.max_linear_counts,
             "entropy_norm_counts": self.entropy_norm_counts,
+            "entropy_norm_by_layer_summary": entropy_norm_by_layer_summary,
+            "entropy_norm_counts_by_layer": self.entropy_norm_counts_by_layer,
+            "row_std_by_layer_head_summary": row_std_by_layer_head_summary,
         }
 
     def save(self, save_prefix: str | Path) -> tuple[Path, Path]:
@@ -301,8 +514,9 @@ class SoftmaxStatsCollector:
         pt_path = save_prefix.with_suffix(".pt")
         json_path = save_prefix.with_suffix(".json")
 
-        torch.save(self.state_dict(), pt_path)
-        payload = self.summary()
+        state = self.state_dict()
+        torch.save(state, pt_path)
+        payload = dict(state.get("summary") or {})
         payload.update(
             {
                 "linear_counts": self.linear_counts.tolist(),
@@ -311,6 +525,13 @@ class SoftmaxStatsCollector:
                 "entropy_norm_counts": self.entropy_norm_counts.tolist(),
             }
         )
+        if self.config.per_layer:
+            payload["entropy_norm_by_layer_summary"] = state.get("entropy_norm_by_layer_summary", {})
+            payload["entropy_norm_counts_by_layer"] = {
+                str(layer): counts.tolist() for layer, counts in self.entropy_norm_counts_by_layer.items()
+            }
+        if self.config.per_head:
+            payload["row_std_by_layer_head_summary"] = state.get("row_std_by_layer_head_summary", {})
         json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         return pt_path, json_path
 
