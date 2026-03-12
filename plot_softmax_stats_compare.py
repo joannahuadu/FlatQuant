@@ -53,6 +53,7 @@ def _load_run(label: str, user_path: str) -> Run:
             "log10_counts": _to_tensor(payload.get("log10_counts", [])),
             "max_linear_counts": _to_tensor(payload.get("max_linear_counts", [])),
             "entropy_norm_counts": _to_tensor(payload.get("entropy_norm_counts", [])),
+            "top1_lag_counts": _to_tensor(payload.get("top1_lag_counts", [])),
         }
         return Run(label=label, path=path, summary=summary, config=config, counts=counts)
 
@@ -72,6 +73,7 @@ def _load_run(label: str, user_path: str) -> Run:
         "log10_counts": _to_tensor(obj.get("log10_counts", [])),
         "max_linear_counts": _to_tensor(obj.get("max_linear_counts", [])),
         "entropy_norm_counts": _to_tensor(obj.get("entropy_norm_counts", [])),
+        "top1_lag_counts": _to_tensor(obj.get("top1_lag_counts", [])),
     }
     return Run(label=label, path=path, summary=summary, config=config, counts=counts)
 
@@ -207,9 +209,28 @@ def main() -> None:
                 f"!= entropy_bins {entropy_bins}"
             )
 
+    # top1_lag_counts config consistency (optional; only plot if present)
+    have_lag = all(int(r.counts["top1_lag_counts"].numel()) > 0 for r in runs)
+    lag_bins = 0
+    lag_max = 0.0
+    if have_lag:
+        lag_bins = _ensure_same_int(
+            "top1_lag_bins", [int(r.config.get("top1_lag_bins", 0)) for r in runs], labels=labels
+        )
+        lag_max = _ensure_same_float(
+            "top1_lag_max", [float(r.config.get("top1_lag_max", 0.0)) for r in runs], labels=labels
+        )
+        for r in runs:
+            if int(r.counts["top1_lag_counts"].numel()) != int(lag_bins):
+                raise ValueError(
+                    f"{r.label}: top1_lag_counts length {int(r.counts['top1_lag_counts'].numel())} != "
+                    f"top1_lag_bins {lag_bins}"
+                )
+
     x_log10 = _linspace_centers(log10_min, 0.0, bins_log10)
     x_01_linear = _linspace_centers(0.0, 1.0, bins_linear)
     x_01_entropy = _linspace_centers(0.0, 1.0, entropy_bins)
+    x_lag = _linspace_centers(0.0, float(lag_max), lag_bins) if have_lag else torch.empty(0)
 
     pref = f"{args.prefix}_" if args.prefix else ""
     _plot_hist_compare(
@@ -245,12 +266,26 @@ def main() -> None:
         ylog=args.ylog,
         dpi=args.dpi,
     )
+    if have_lag:
+        _plot_hist_compare(
+            runs=runs,
+            key="top1_lag_counts",
+            outpath=args.outdir / f"{pref}top1_lag_counts.png",
+            title="Top-1 attention lag histogram",
+            xlabel="lag = query_pos - argmax_k",
+            x=x_lag,
+            normalize=args.normalize,
+            ylog=args.ylog,
+            dpi=args.dpi,
+        )
 
     outdir = args.outdir.resolve()
     print(f"Saved plots to {outdir}")
     print(f"  - {outdir / f'{pref}log10_counts.png'}")
     print(f"  - {outdir / f'{pref}max_linear_counts.png'}")
     print(f"  - {outdir / f'{pref}entropy_norm_counts.png'}")
+    if have_lag:
+        print(f"  - {outdir / f'{pref}top1_lag_counts.png'}")
 
 
 if __name__ == "__main__":

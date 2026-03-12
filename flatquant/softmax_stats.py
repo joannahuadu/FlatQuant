@@ -32,6 +32,9 @@ class SoftmaxStatsConfig:
     per_head: bool = False
     head_dim: int = 1
     row_std_rows_per_call: int = 2_048
+    top1_lag_rows_per_call: int = 2_048
+    top1_lag_bins: int = 512
+    top1_lag_max: int = 8_192
 
 
 class SoftmaxStatsCollector:
@@ -77,6 +80,15 @@ class SoftmaxStatsCollector:
         self.entropy_norm_counts = torch.zeros(self.config.entropy_bins, dtype=torch.int64)
         self._entropy_norm_lt_counts = [0] * len(NORM_ENTROPY_LT_THRESHOLDS)
 
+        self.top1_lag_n: int = 0
+        self.top1_lag_sum: float = 0.0
+        self.top1_lag_sumsq: float = 0.0
+        self.top1_lag_min: float = math.inf
+        self.top1_lag_max: float = -math.inf
+        self.top1_lag_counts = torch.zeros(self.config.top1_lag_bins, dtype=torch.int64)
+        self.top1_lag_neg_n: int = 0
+        self.top1_lag_overflow_n: int = 0
+
         self._current_layer: int | None = None
         self._layer_stack: list[int | None] = []
 
@@ -96,6 +108,19 @@ class SoftmaxStatsCollector:
 
         self._orig_torch_softmax = None
         self._orig_tensor_softmax = None
+
+    def _infer_q_dim(self, out: torch.Tensor) -> int | None:
+        if not torch.is_tensor(out) or out.dim() != 4:
+            return None
+        head_dim = int(self.config.head_dim) % int(out.dim())
+        if head_dim == out.dim() - 1:
+            head_dim = -1
+        # Assume common layouts:
+        # - [B, H, Q, K] when head_dim=1 -> q_dim=2
+        # - [B, Q, H, K] when head_dim=2 -> q_dim=1
+        if head_dim == 2:
+            return 1
+        return 2
 
     def push_layer(self, layer_idx: int) -> None:
         self._layer_stack.append(self._current_layer)
@@ -248,9 +273,16 @@ class SoftmaxStatsCollector:
             and out.dim() == 4
             and out.shape[-1] > 1
         )
+        need_top1_lag = (
+            self.config.top1_lag_rows_per_call > 0
+            and self.config.top1_lag_bins > 0
+            and self.config.top1_lag_max > 0
+            and out.dim() == 4
+            and out.shape[-1] > 1
+        )
 
         # Per-row entropy (normalized) and/or per-layer-per-head row-wise std.
-        if need_entropy or need_row_std:
+        if need_entropy or need_row_std or need_top1_lag:
             rows = out.detach().reshape(-1, out.shape[-1])
             if rows.numel():
                 total_rows = int(rows.shape[0])
@@ -259,6 +291,8 @@ class SoftmaxStatsCollector:
                     max_rows = max(max_rows, int(self.config.entropy_rows_per_call))
                 if need_row_std:
                     max_rows = max(max_rows, int(self.config.row_std_rows_per_call))
+                if need_top1_lag:
+                    max_rows = max(max_rows, int(self.config.top1_lag_rows_per_call))
                 max_rows = min(max_rows, total_rows)
                 if max_rows < total_rows:
                     ridx_all = torch.randint(0, total_rows, (max_rows,), device=rows.device)
@@ -294,6 +328,63 @@ class SoftmaxStatsCollector:
                                 self._entropy_norm_lt_counts[i] += int((ent_norm < thr).sum().item())
                             if self.config.per_layer and self._current_layer is not None:
                                 self._update_entropy_norm_by_layer(self._current_layer, ent_norm)
+
+                if need_top1_lag:
+                    q_dim = self._infer_q_dim(out)
+                    if q_dim is not None:
+                        n_lag = min(int(self.config.top1_lag_rows_per_call), int(rows_all.shape[0]))
+                        if n_lag > 0:
+                            rows_l = rows_all[:n_lag]
+                            if ridx_all is not None:
+                                ridx_l = ridx_all[:n_lag]
+                            else:
+                                ridx_l = torch.arange(n_lag, device=rows.device)
+
+                            top1_idx = rows_l.argmax(dim=-1).to(dtype=torch.int64)
+
+                            d0, d1, d2, k_len = (
+                                int(out.shape[0]),
+                                int(out.shape[1]),
+                                int(out.shape[2]),
+                                int(out.shape[-1]),
+                            )
+                            denom12 = max(d1 * d2, 1)
+                            i0 = ridx_l // denom12
+                            rem = ridx_l - i0 * denom12
+                            i1 = rem // max(d2, 1)
+                            i2 = rem % max(d2, 1)
+                            if int(q_dim) == 0:
+                                q_idx = i0
+                            elif int(q_dim) == 1:
+                                q_idx = i1
+                            else:
+                                q_idx = i2
+
+                            q_len = int(out.shape[int(q_dim)])
+                            if q_len > 0 and k_len > 0:
+                                offset = max(k_len - q_len, 0)
+                                query_pos = q_idx.to(dtype=torch.int64) + int(offset)
+                                lag = query_pos - top1_idx
+                                self.top1_lag_neg_n += int((lag < 0).sum().item())
+                                lag_pos = lag.clamp_min(0)
+                                self.top1_lag_overflow_n += int((lag_pos > int(self.config.top1_lag_max)).sum().item())
+
+                                lag_f = lag_pos.to(dtype=torch.float32)
+                                if lag_f.numel():
+                                    self.top1_lag_n += int(lag_f.numel())
+                                    self.top1_lag_sum += float(lag_f.sum().item())
+                                    self.top1_lag_sumsq += float((lag_f * lag_f).sum().item())
+                                    self.top1_lag_min = min(self.top1_lag_min, float(lag_f.min().item()))
+                                    self.top1_lag_max = max(self.top1_lag_max, float(lag_f.max().item()))
+
+                                    lag_clip = lag_f.clamp_max(float(self.config.top1_lag_max))
+                                    hist = torch.histc(
+                                        lag_clip,
+                                        bins=int(self.config.top1_lag_bins),
+                                        min=0.0,
+                                        max=float(self.config.top1_lag_max),
+                                    )
+                                    self.top1_lag_counts += hist.to(dtype=torch.int64).cpu()
 
                 if need_row_std:
                     n_rs = min(int(self.config.row_std_rows_per_call), int(rows_all.shape[0]))
@@ -397,6 +488,11 @@ class SoftmaxStatsCollector:
         entn_var = max(self.entropy_norm_sumsq / entn_n - entn_mean * entn_mean, 0.0)
         entn_std = math.sqrt(entn_var)
 
+        lag_n = max(self.top1_lag_n, 1)
+        lag_mean = self.top1_lag_sum / lag_n
+        lag_var = max(self.top1_lag_sumsq / lag_n - lag_mean * lag_mean, 0.0)
+        lag_std = math.sqrt(lag_var)
+
         return {
             "n_calls": self.n_calls,
             "n_skipped": self.n_skipped,
@@ -431,6 +527,13 @@ class SoftmaxStatsCollector:
             "entropy_norm_lt_ratio": [
                 c / max(self.entropy_norm_n, 1) for c in self._entropy_norm_lt_counts
             ],
+            "top1_lag_n": self.top1_lag_n,
+            "top1_lag_min": None if not math.isfinite(self.top1_lag_min) else self.top1_lag_min,
+            "top1_lag_max": None if not math.isfinite(self.top1_lag_max) else self.top1_lag_max,
+            "top1_lag_mean": lag_mean if self.top1_lag_n else None,
+            "top1_lag_std": lag_std if self.top1_lag_n else None,
+            "top1_lag_neg_ratio": self.top1_lag_neg_n / max(self.top1_lag_n, 1),
+            "top1_lag_overflow_ratio": self.top1_lag_overflow_n / max(self.top1_lag_n, 1),
             "config": {
                 "sample_per_call": self.config.sample_per_call,
                 "max_calls": self.config.max_calls,
@@ -446,6 +549,9 @@ class SoftmaxStatsCollector:
                 "per_head": self.config.per_head,
                 "head_dim": self.config.head_dim,
                 "row_std_rows_per_call": self.config.row_std_rows_per_call,
+                "top1_lag_rows_per_call": self.config.top1_lag_rows_per_call,
+                "top1_lag_bins": self.config.top1_lag_bins,
+                "top1_lag_max": self.config.top1_lag_max,
             },
         }
 
@@ -502,6 +608,7 @@ class SoftmaxStatsCollector:
             "log10_counts": self.log10_counts,
             "max_linear_counts": self.max_linear_counts,
             "entropy_norm_counts": self.entropy_norm_counts,
+            "top1_lag_counts": self.top1_lag_counts,
             "entropy_norm_by_layer_summary": entropy_norm_by_layer_summary,
             "entropy_norm_counts_by_layer": self.entropy_norm_counts_by_layer,
             "row_std_by_layer_head_summary": row_std_by_layer_head_summary,
@@ -523,6 +630,7 @@ class SoftmaxStatsCollector:
                 "log10_counts": self.log10_counts.tolist(),
                 "max_linear_counts": self.max_linear_counts.tolist(),
                 "entropy_norm_counts": self.entropy_norm_counts.tolist(),
+                "top1_lag_counts": self.top1_lag_counts.tolist(),
             }
         )
         if self.config.per_layer:

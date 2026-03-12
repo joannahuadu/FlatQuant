@@ -43,6 +43,9 @@ class SoftmaxStatsScope:
                 per_head=bool(getattr(args, "softmax_stats_per_head", False)),
                 head_dim=int(getattr(args, "softmax_stats_head_dim", 1)),
                 row_std_rows_per_call=int(getattr(args, "softmax_stats_row_std_rows", 2048)),
+                top1_lag_rows_per_call=int(getattr(args, "softmax_stats_top1_lag_rows", 2048)),
+                top1_lag_bins=int(getattr(args, "softmax_stats_top1_lag_bins", 512)),
+                top1_lag_max=int(getattr(args, "softmax_stats_top1_lag_max", 8192)),
             ),
             logger=logger,
         )
@@ -60,7 +63,10 @@ class SoftmaxStatsScope:
             f"per_layer={self.softmax_stats.config.per_layer}, "
             f"per_head={self.softmax_stats.config.per_head}, "
             f"head_dim={self.softmax_stats.config.head_dim}, "
-            f"row_std_rows={self.softmax_stats.config.row_std_rows_per_call}"
+            f"row_std_rows={self.softmax_stats.config.row_std_rows_per_call}, "
+            f"top1_lag_rows={self.softmax_stats.config.top1_lag_rows_per_call}, "
+            f"top1_lag_bins={self.softmax_stats.config.top1_lag_bins}, "
+            f"top1_lag_max={self.softmax_stats.config.top1_lag_max}"
         )
 
     def _install_layer_hooks(self) -> None:

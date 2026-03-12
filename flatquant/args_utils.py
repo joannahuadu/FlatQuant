@@ -332,6 +332,12 @@ def parser_gen():
                         help='Which dimension of the softmax output is the attention head dim (default: 1 for [B,H,Q,K]).')
     parser.add_argument('--softmax_stats_row_std_rows', type=int, default=2048,
                         help='Max number of attention rows to sample per softmax call for per-head row-std computation.')
+    parser.add_argument('--softmax_stats_top1_lag_rows', type=int, default=2048,
+                        help='Max number of attention rows to sample per softmax call for top-1 lag computation.')
+    parser.add_argument('--softmax_stats_top1_lag_bins', type=int, default=512,
+                        help='Number of bins for top-1 lag histogram in [0, top1_lag_max].')
+    parser.add_argument('--softmax_stats_top1_lag_max', type=int, default=8192,
+                        help='Upper bound for top-1 lag histogram (values are clamped to this max).')
     parser.add_argument('--softmax_stats_save_path', type=str, default=None,
                         help='Optional save prefix for softmax stats (.pt/.json). Default: <exp_dir>/softmax_stats')
 
