@@ -415,58 +415,58 @@ def main():
             dataset_ppl = eval_utils.ppl_eval(model, testloader)
             logger.info(dataset_ppl)
 
-        if args.lm_eval:
-            import lm_eval
-            from lm_eval import utils as lm_eval_utils
-            from lm_eval.models.huggingface import HFLM
-            from lm_eval.tasks import initialize_tasks
-            initialize_tasks()
+    if args.lm_eval:
+        import lm_eval
+        from lm_eval import utils as lm_eval_utils
+        from lm_eval.models.huggingface import HFLM
+        from lm_eval.tasks import initialize_tasks
+        initialize_tasks()
 
-            hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
+        hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
 
-            task_names = lm_eval_utils.pattern_match(args.tasks, lm_eval.tasks.ALL_TASKS)
-            results = lm_eval.simple_evaluate(
-                hflm,
-                tasks=task_names,
-                num_fewshot=args.num_fewshot,
-                batch_size=args.lm_eval_batch_size,
-            )
+        task_names = lm_eval_utils.pattern_match(args.tasks, lm_eval.tasks.ALL_TASKS)
+        results = lm_eval.simple_evaluate(
+            hflm,
+            tasks=task_names,
+            num_fewshot=args.num_fewshot,
+            batch_size=args.lm_eval_batch_size,
+        )
 
-            results_by_task = results.get("results", {})
-            print("\n" + "=" * 60)
-            print("Evaluation Results")
-            print("=" * 60)
-            for task, metrics in results_by_task.items():
-                print(f"\n{task}:")
-                for k, v in metrics.items():
-                    if "stderr" not in k:
-                        print(f"  {k}: {v}")
+        results_by_task = results.get("results", {})
+        print("\n" + "=" * 60)
+        print("Evaluation Results")
+        print("=" * 60)
+        for task, metrics in results_by_task.items():
+            print(f"\n{task}:")
+            for k, v in metrics.items():
+                if "stderr" not in k:
+                    print(f"  {k}: {v}")
 
-            print("\n" + "=" * 60)
-            print("Summary")
-            print("=" * 60)
-            summary_metrics = {}
-            for task, metrics in results_by_task.items():
-                for k, v in metrics.items():
-                    if "stderr" in k:
-                        continue
-                    if k.endswith("/acc") or "acc" in k.lower():
-                        key = f"{task} {k}"
-                        summary_metrics[key] = v
-                        print(f"{key}: {v}")
+        print("\n" + "=" * 60)
+        print("Summary")
+        print("=" * 60)
+        summary_metrics = {}
+        for task, metrics in results_by_task.items():
+            for k, v in metrics.items():
+                if "stderr" in k:
+                    continue
+                if k.endswith("/acc") or "acc" in k.lower():
+                    key = f"{task} {k}"
+                    summary_metrics[key] = v
+                    print(f"{key}: {v}")
 
-            if hasattr(args, "wandb") and args.wandb and summary_metrics:
-                import wandb
-                wandb.log(summary_metrics)
+        if hasattr(args, "wandb") and args.wandb and summary_metrics:
+            import wandb
+            wandb.log(summary_metrics)
 
-            if args.output_file:
-                import json
-                from pathlib import Path
-                output_path = Path(args.output_file)
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                with output_path.open("w") as f:
-                    json.dump(results_by_task, f, indent=2)
-                print(f"\nResults saved to {args.output_file}")
+        if args.output_file:
+            import json
+            from pathlib import Path
+            output_path = Path(args.output_file)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with output_path.open("w") as f:
+                json.dump(results_by_task, f, indent=2)
+            print(f"\nResults saved to {args.output_file}")
 
 
 if __name__ == '__main__':
