@@ -335,6 +335,13 @@ def parser_gen():
     parser.add_argument('--softmax_stats_save_path', type=str, default=None,
                         help='Optional save prefix for softmax stats (.pt/.json). Default: <exp_dir>/softmax_stats')
 
+    # Softmax logits scaling (temperature-like): softmax(alpha * logits)
+    parser.add_argument('--softmax_alpha_path', type=str, default=None,
+                        help='Optional .pt file containing alpha for attention softmax: softmax(alpha * logits).')
+    parser.add_argument('--softmax_alpha_mode', type=str, default='auto',
+                        choices=['auto', 'global', 'layer', 'head', 'layer_head'],
+                        help='How to interpret the alpha tensor from --softmax_alpha_path.')
+
     args = parser.parse_args()
     if args.a_groupsize > -1:
         raise NotImplementedError

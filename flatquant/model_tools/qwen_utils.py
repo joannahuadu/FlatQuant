@@ -164,7 +164,8 @@ class FlatQuantQwen2Attention(Qwen2Attention):
     def __init__(self, args, module: Qwen2Attention):
         super().__init__(module.config, module.layer_idx)
         self.args = args
-        
+        self.register_buffer("softmax_alpha", torch.tensor(1.0, dtype=torch.float32), persistent=False)
+
         self.q_proj = FlatQuantizedLinear(args, module.q_proj)
         self.k_proj = FlatQuantizedLinear(args, module.k_proj)
         self.v_proj = FlatQuantizedLinear(args, module.v_proj)
@@ -325,6 +326,18 @@ class FlatQuantQwen2Attention(Qwen2Attention):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups) # bnsh
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+
+        alpha = self.softmax_alpha
+        if alpha is not None:
+            if alpha.device != attn_weights.device:
+                alpha = alpha.to(attn_weights.device)
+            if alpha.numel() == 1:
+                if float(alpha.item()) != 1.0:
+                    attn_weights = attn_weights * alpha
+            else:
+                if int(alpha.numel()) != int(self.num_heads):
+                    raise ValueError(f"softmax_alpha length {int(alpha.numel())} != num_heads {int(self.num_heads)}")
+                attn_weights = attn_weights * alpha.view(1, -1, 1, 1)
 
         if attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
