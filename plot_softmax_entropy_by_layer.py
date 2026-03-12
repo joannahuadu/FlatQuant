@@ -38,16 +38,22 @@ def _load_payload(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _parse_layer_summary(payload: dict[str, Any]) -> tuple[list[int], list[float], list[float]]:
+def _parse_layer_summary(payload: dict[str, Any]) -> tuple[list[int], list[float], list[float], list[float], list[float]]:
     by_layer = payload.get("entropy_norm_by_layer_summary") or {}
     if not isinstance(by_layer, dict) or not by_layer:
         raise ValueError("Missing entropy_norm_by_layer_summary (did you enable --softmax_stats_per_layer?)")
 
     layer_ids = sorted(int(k) for k in by_layer.keys())
     means: list[float] = []
+    mins: list[float] = []
+    maxs: list[float] = []
     lt_001: list[float] = []
     for lid in layer_ids:
         item = by_layer[str(lid)]
+        vmin = item.get("min", None)
+        vmax = item.get("max", None)
+        mins.append(float(vmin) if vmin is not None else float("nan"))
+        maxs.append(float(vmax) if vmax is not None else float("nan"))
         means.append(float(item.get("mean", float("nan"))))
         lt_thresholds = item.get("lt_thresholds") or []
         lt_ratio = item.get("lt_ratio") or []
@@ -57,7 +63,7 @@ def _parse_layer_summary(payload: dict[str, Any]) -> tuple[list[int], list[float
         except ValueError:
             j = 1 if len(lt_ratio) > 1 else 0
         lt_001.append(float(lt_ratio[j]) if j < len(lt_ratio) else float("nan"))
-    return layer_ids, means, lt_001
+    return layer_ids, means, mins, maxs, lt_001
 
 
 def main() -> None:
@@ -90,22 +96,30 @@ def main() -> None:
     for label, p in args.run:
         path = _resolve_stats_path(Path(p))
         payload = _load_payload(path)
-        layer_ids, means, lt_001 = _parse_layer_summary(payload)
-        runs.append((label, path, layer_ids, means, lt_001))
+        layer_ids, means, mins, maxs, lt_001 = _parse_layer_summary(payload)
+        runs.append((label, path, layer_ids, means, mins, maxs, lt_001))
 
     # Use layer ids from first run as x-axis reference.
     x = runs[0][2]
-    for label, _path, layer_ids, _means, _lt in runs[1:]:
+    for label, _path, layer_ids, _means, _mins, _maxs, _lt in runs[1:]:
         if layer_ids != x:
             raise ValueError(f"Layer id mismatch vs first run: {label} has {layer_ids[:5]}... (len={len(layer_ids)})")
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9.0, 6.5), sharex=True)
-    for label, _path, _layer_ids, means, lt_001 in runs:
-        ax1.plot(x, means, label=label, linewidth=1.8)
+    for label, _path, _layer_ids, means, mins, maxs, lt_001 in runs:
+        (line,) = ax1.plot(x, means, label=label, linewidth=1.8)
+        ax1.fill_between(
+            x,
+            mins,
+            maxs,
+            color=line.get_color(),
+            alpha=0.18,
+            linewidth=0.0,
+        )
         ax2.plot(x, lt_001, label=label, linewidth=1.8)
 
-    ax1.set_title("Per-layer normalized entropy (mean)")
-    ax1.set_ylabel("H_norm mean")
+    ax1.set_title("Per-layer normalized entropy (mean with min-max band)")
+    ax1.set_ylabel("H_norm")
     ax1.grid(True, alpha=0.25)
     ax1.legend()
 
@@ -126,4 +140,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
