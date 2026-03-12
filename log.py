@@ -393,6 +393,11 @@ def main():
     else:
         model.to(utils.DEV)
 
+    # Apply optional softmax alpha scaling (softmax(alpha * logits)) after final device placement.
+    from flatquant.softmax_alpha import apply_softmax_alpha
+
+    apply_softmax_alpha(model, args, logger)
+
     # register observation hook after model moves to device
     _register_log_hooks(model, logger, args)
 
