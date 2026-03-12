@@ -108,14 +108,14 @@ def main() -> None:
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9.0, 6.5), sharex=True)
     for label, _path, _layer_ids, means, mins, maxs, lt_001 in runs:
         (line,) = ax1.plot(x, means, label=label, linewidth=1.8)
-        ax1.fill_between(
-            x,
-            mins,
-            maxs,
-            color=line.get_color(),
-            alpha=0.18,
-            linewidth=0.0,
-        )
+        # ax1.fill_between(
+        #     x,
+        #     mins,
+        #     maxs,
+        #     color=line.get_color(),
+        #     alpha=0.18,
+        #     linewidth=0.0,
+        # )
         ax2.plot(x, lt_001, label=label, linewidth=1.8)
 
     ax1.set_title("Per-layer normalized entropy (mean with min-max band)")
