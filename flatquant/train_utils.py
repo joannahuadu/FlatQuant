@@ -1882,3 +1882,250 @@ def cali_flat_quant(args, model, dataloader, dev, logger):
     torch.cuda.empty_cache()
     model.config.use_cache = use_cache
     return model
+
+
+def cali_softmax_alpha(args, model, dataloader, dev, logger):
+    """Layer-wise softmax(alpha * logits) calibration with MSE supervision.
+
+    Reference outputs are computed with `_ori_mode=True` and `alpha=1.0`.
+    Then, for each layer, we optimize a learnable scalar `softmax_alpha` to
+    minimize MSE between quant/flat forward and the reference outputs.
+    """
+    model.eval()
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+
+    if not torch.cuda.is_available() and str(dev).startswith("cuda"):
+        raise RuntimeError(f"CUDA not available but requested device: {dev}")
+
+    # Freeze everything by default.
+    set_require_grad_all(model, False)
+
+    # AMP / dtype policy (mirrors cali_flat_quant defaults).
+    if getattr(args, "deactive_amp", False):
+        dtype = torch.float32
+        traincast = nullcontext
+    else:
+        dtype = torch.float16 if isinstance(model, transformers.LlamaForCausalLM) else torch.bfloat16
+        traincast = functools.partial(torch.amp.autocast, device_type="cuda", dtype=dtype)
+
+    root = model.module if hasattr(model, "module") else model
+    if not (hasattr(root, "model") and hasattr(root.model, "layers")):
+        raise ValueError("cali_softmax_alpha expects model.model.layers (Llama/Qwen-like).")
+
+    layers = root.model.layers
+    if len(layers) == 0:
+        raise ValueError("Empty model.model.layers")
+
+    if not hasattr(root.model, "embed_tokens"):
+        raise ValueError("cali_softmax_alpha expects model.model.embed_tokens.")
+
+    # Ensure each layer has a learnable scalar softmax_alpha (Parameter).
+    n_alpha = 0
+    for layer in layers:
+        attn = getattr(layer, "self_attn", None)
+        if attn is None or not hasattr(attn, "softmax_alpha"):
+            continue
+        a = getattr(attn, "softmax_alpha")
+        if a is None:
+            a0 = torch.tensor([1.0], dtype=torch.float32)
+        else:
+            a_t = torch.as_tensor(a, dtype=torch.float32).detach().reshape(-1)
+            a0 = a_t.mean().reshape(1) if a_t.numel() else torch.tensor([1.0], dtype=torch.float32)
+        attn.softmax_alpha = nn.Parameter(a0, requires_grad=False)
+        n_alpha += 1
+
+    if n_alpha == 0:
+        raise ValueError("No attention modules with attribute softmax_alpha found; nothing to calibrate.")
+
+    alpha_lr = float(getattr(args, "softmax_alpha_lr", None) or getattr(args, "flat_lr", 1e-5))
+    alpha_epochs = int(getattr(args, "softmax_alpha_epochs", None) or getattr(args, "epochs", 1))
+    alpha_min = float(getattr(args, "softmax_alpha_min", 0.01))
+    alpha_max = float(getattr(args, "softmax_alpha_max", 10.0))
+    if alpha_min <= 0 or alpha_max <= 0 or alpha_max < alpha_min:
+        raise ValueError(f"Invalid alpha clamp: min={alpha_min}, max={alpha_max}")
+
+    # Move embedding layer and first layer to device to capture the first-layer inputs.
+    layers[0] = layers[0].to(dev)
+    root.model.embed_tokens = root.model.embed_tokens.to(dev)
+    if hasattr(root.model, "rotary_emb"):
+        root.model.rotary_emb = root.model.rotary_emb.to(dev)
+
+    inps = torch.zeros((args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev)
+    cache = {"i": 0}
+
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, inp, **kwargs):
+            inps[cache["i"]] = inp
+            cache["i"] += 1
+            cache["attention_mask"] = kwargs.get("attention_mask", None)
+            cache["position_ids"] = kwargs.get("position_ids", None)
+            raise ValueError
+
+    layers[0] = Catcher(layers[0])
+    with torch.no_grad():
+        for batch in dataloader:
+            if cache["i"] >= args.nsamples:
+                break
+            try:
+                sample = batch[0]
+                model(sample.to(dev))
+            except ValueError:
+                pass
+
+    position_ids = cache.get("position_ids", None)
+    attention_mask = cache.get("attention_mask", None)
+    if attention_mask is not None:
+        attention_mask_batch = attention_mask.repeat(args.cali_bsz, 1, 1, 1).float()
+    else:
+        attention_mask_batch = None
+
+    # Move embedding and first layer back to CPU (we'll do layer-wise training).
+    layers[0] = layers[0].module
+    layers[0] = layers[0].cpu()
+    root.model.embed_tokens = root.model.embed_tokens.cpu()
+    if hasattr(root.model, "rotary_emb"):
+        root.model.rotary_emb = root.model.rotary_emb.cpu()
+    torch.cuda.empty_cache()
+
+    fp_inps = inps
+    fp_outs = torch.zeros_like(inps)
+    ref_outs = torch.zeros_like(inps)
+    loss_func = torch.nn.MSELoss()
+    bf16_ori_only = not bool(getattr(args, "quantize", False))
+
+    alpha_by_layer: list[float] = []
+
+    for i in range(len(layers)):
+        layer = layers[i].to(dev)
+        dtype_dict = {name: param.dtype for name, param in layer.named_parameters()}
+        with torch.no_grad():
+            layer.float()
+
+        attn = getattr(layer, "self_attn", None)
+        mlp = getattr(layer, "mlp", None)
+        alpha_p = getattr(attn, "softmax_alpha", None) if attn is not None else None
+        if alpha_p is None:
+            logger.warning(f"[softmax_alpha] layer {i}: missing self_attn.softmax_alpha; skip training.")
+            # Still need to produce fp_outs for downstream layers.
+            with torch.no_grad():
+                for j in range(0, args.nsamples, args.cali_bsz):
+                    bs = min(args.cali_bsz, args.nsamples - j)
+                    mask = (
+                        attention_mask_batch[:bs] if attention_mask_batch is not None and bs == args.cali_bsz
+                        else (attention_mask.repeat(bs, 1, 1, 1).float() if attention_mask is not None else None)
+                    )
+                    out = layer(fp_inps[j : j + bs], attention_mask=mask, position_ids=position_ids)[0]
+                    fp_outs[j : j + bs] = out
+            alpha_by_layer.append(float("nan"))
+        else:
+            # Build reference outputs: ori_mode=True with alpha=1.0.
+            old_attn_mode = getattr(attn, "_ori_mode", None)
+            old_mlp_mode = getattr(mlp, "_ori_mode", None) if mlp is not None else None
+            attn._ori_mode = True
+            if mlp is not None:
+                mlp._ori_mode = True
+
+            alpha_saved = alpha_p.detach().clone()
+            with torch.no_grad():
+                alpha_p.data.fill_(1.0)
+                for j in range(args.nsamples):
+                    ref_outs[j] = layer(
+                        fp_inps[j].unsqueeze(0),
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                    )[0]
+                alpha_p.data.copy_(alpha_saved.to(alpha_p))
+
+            # Switch to target mode for training.
+            if not bf16_ori_only:
+                attn._ori_mode = False
+                if mlp is not None:
+                    mlp._ori_mode = False
+
+            # Evaluate pre-train error.
+            mse_pre = 0.0
+            with torch.no_grad():
+                for j in range(0, args.nsamples, args.cali_bsz):
+                    bs = min(args.cali_bsz, args.nsamples - j)
+                    mask = (
+                        attention_mask_batch[:bs] if attention_mask_batch is not None and bs == args.cali_bsz
+                        else (attention_mask.repeat(bs, 1, 1, 1).float() if attention_mask is not None else None)
+                    )
+                    out = layer(fp_inps[j : j + bs], attention_mask=mask, position_ids=position_ids)[0]
+                    loss = loss_func(ref_outs[j : j + bs], out)
+                    mse_pre += float(loss.detach().cpu().item())
+
+            # Train alpha for this layer.
+            alpha_init = float(alpha_p.detach().reshape(-1)[0].cpu().item())
+            alpha_p.requires_grad_(True)
+            optimizer = torch.optim.AdamW([alpha_p], lr=alpha_lr)
+            for epoch in range(alpha_epochs):
+                mse = 0.0
+                with traincast():
+                    for j in range(0, args.nsamples, args.cali_bsz):
+                        bs = min(args.cali_bsz, args.nsamples - j)
+                        mask = (
+                            attention_mask_batch[:bs] if attention_mask_batch is not None and bs == args.cali_bsz
+                            else (attention_mask.repeat(bs, 1, 1, 1).float() if attention_mask is not None else None)
+                        )
+                        out = layer(fp_inps[j : j + bs], attention_mask=mask, position_ids=position_ids)[0]
+                        loss = loss_func(ref_outs[j : j + bs], out)
+                        optimizer.zero_grad(set_to_none=True)
+                        loss.backward()
+                        optimizer.step()
+                        with torch.no_grad():
+                            alpha_p.data.clamp_(min=alpha_min, max=alpha_max)
+                        mse += float(loss.detach().cpu().item())
+                cur_alpha = float(alpha_p.detach().reshape(-1)[0].cpu().item())
+                logger.info(f"[softmax_alpha] layer {i} epoch {epoch} mse={mse:.8f} alpha={cur_alpha:.6f}")
+
+            alpha_p.requires_grad_(False)
+            alpha_final = float(alpha_p.detach().reshape(-1)[0].cpu().item())
+            alpha_by_layer.append(alpha_final)
+
+            # Evaluate post-train error and produce outputs for downstream layers.
+            mse_post = 0.0
+            with torch.no_grad():
+                for j in range(0, args.nsamples, args.cali_bsz):
+                    bs = min(args.cali_bsz, args.nsamples - j)
+                    mask = (
+                        attention_mask_batch[:bs] if attention_mask_batch is not None and bs == args.cali_bsz
+                        else (attention_mask.repeat(bs, 1, 1, 1).float() if attention_mask is not None else None)
+                    )
+                    out = layer(fp_inps[j : j + bs], attention_mask=mask, position_ids=position_ids)[0]
+                    fp_outs[j : j + bs] = out
+                    loss = loss_func(ref_outs[j : j + bs], out)
+                    mse_post += float(loss.detach().cpu().item())
+
+            logger.info(
+                f"[softmax_alpha] layer {i} done: alpha {alpha_init:.6f}->{alpha_final:.6f} "
+                f"mse pre={mse_pre:.8f} post={mse_post:.8f}"
+            )
+
+            # Restore original mode flags (best-effort).
+            if old_attn_mode is not None:
+                attn._ori_mode = bool(old_attn_mode)
+            if mlp is not None and old_mlp_mode is not None:
+                mlp._ori_mode = bool(old_mlp_mode)
+
+        # Restore param dtypes.
+        for name, param in layer.named_parameters():
+            if name in dtype_dict:
+                param.data = param.to(dtype_dict[name])
+
+        fp_inps, fp_outs = fp_outs, fp_inps
+        layers[i] = layer.to("cpu")
+        del layer
+        torch.cuda.empty_cache()
+
+    del inps, fp_inps, fp_outs, ref_outs
+    gc.collect()
+    torch.cuda.empty_cache()
+    model.config.use_cache = use_cache
+
+    return torch.tensor(alpha_by_layer, dtype=torch.float32)

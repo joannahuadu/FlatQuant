@@ -347,6 +347,16 @@ def parser_gen():
     parser.add_argument('--softmax_alpha_mode', type=str, default='auto',
                         choices=['auto', 'global', 'layer', 'head', 'layer_head'],
                         help='How to interpret the alpha tensor from --softmax_alpha_path.')
+    parser.add_argument('--softmax_alpha_save_path', type=str, default=None,
+                        help='Optional output path for learned softmax alpha (.pt). Default: <exp_dir>/softmax_alpha_learned.pt')
+    parser.add_argument('--softmax_alpha_lr', type=float, default=None,
+                        help='Optional LR override for softmax alpha calibration (default: --flat_lr).')
+    parser.add_argument('--softmax_alpha_epochs', type=int, default=None,
+                        help='Optional epochs override for softmax alpha calibration (default: --epochs).')
+    parser.add_argument('--softmax_alpha_min', type=float, default=0.01,
+                        help='Clamp minimum for learned alpha (must be >0).')
+    parser.add_argument('--softmax_alpha_max', type=float, default=10.0,
+                        help='Clamp maximum for learned alpha (must be >0).')
 
     args = parser.parse_args()
     if args.a_groupsize > -1:

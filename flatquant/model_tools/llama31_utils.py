@@ -491,8 +491,7 @@ class FlatQuantLlamaAttention(LlamaAttention):
             if alpha.device != attn_weights.device:
                 alpha = alpha.to(attn_weights.device)
             if alpha.numel() == 1:
-                if float(alpha.item()) != 1.0:
-                    attn_weights = attn_weights * alpha
+                attn_weights = attn_weights * alpha
             else:
                 if int(alpha.numel()) != int(self.num_heads):
                     raise ValueError(f"softmax_alpha length {int(alpha.numel())} != num_heads {int(self.num_heads)}")
