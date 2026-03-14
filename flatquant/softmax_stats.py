@@ -14,6 +14,7 @@ PROB_LT_THRESHOLDS = (1e-2, 1e-4, 1e-6, 1e-8, 1e-10, 1e-12)
 PROB_GT_THRESHOLDS = (0.9, 0.99, 0.999)
 ROW_MAX_GT_THRESHOLDS = (0.9, 0.99, 0.999)
 NORM_ENTROPY_LT_THRESHOLDS = (0.1, 0.01)
+TOP1_LAG_LE_THRESHOLDS = (0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024)
 
 
 @dataclass
@@ -88,6 +89,7 @@ class SoftmaxStatsCollector:
         self.top1_lag_counts = torch.zeros(self.config.top1_lag_bins, dtype=torch.int64)
         self.top1_lag_neg_n: int = 0
         self.top1_lag_overflow_n: int = 0
+        self._top1_lag_le_counts = [0] * len(TOP1_LAG_LE_THRESHOLDS)
 
         self._current_layer: int | None = None
         self._layer_stack: list[int | None] = []
@@ -100,6 +102,16 @@ class SoftmaxStatsCollector:
         self.entropy_norm_counts_by_layer: dict[int, torch.Tensor] = {}
         self.entropy_norm_lt_counts_by_layer: dict[int, list[int]] = {}
 
+        self.top1_lag_by_layer_n: dict[int, int] = {}
+        self.top1_lag_by_layer_sum: dict[int, float] = {}
+        self.top1_lag_by_layer_sumsq: dict[int, float] = {}
+        self.top1_lag_by_layer_min: dict[int, float] = {}
+        self.top1_lag_by_layer_max: dict[int, float] = {}
+        self.top1_lag_counts_by_layer: dict[int, torch.Tensor] = {}
+        self.top1_lag_neg_by_layer_n: dict[int, int] = {}
+        self.top1_lag_overflow_by_layer_n: dict[int, int] = {}
+        self.top1_lag_le_counts_by_layer: dict[int, list[int]] = {}
+
         self.row_std_by_layer_head_n: dict[int, list[int]] = {}
         self.row_std_by_layer_head_sum: dict[int, list[float]] = {}
         self.row_std_by_layer_head_sumsq: dict[int, list[float]] = {}
@@ -108,6 +120,7 @@ class SoftmaxStatsCollector:
 
         self._orig_torch_softmax = None
         self._orig_tensor_softmax = None
+        self._top1_lag_le_thr_t = None
 
     def _infer_q_dim(self, out: torch.Tensor) -> int | None:
         if not torch.is_tensor(out) or out.dim() != 4:
@@ -171,6 +184,67 @@ class SoftmaxStatsCollector:
             self.entropy_norm_lt_counts_by_layer[layer] = lt_counts
         for i, thr in enumerate(NORM_ENTROPY_LT_THRESHOLDS):
             lt_counts[i] += int((ent_norm < thr).sum().item())
+
+    def _update_top1_lag_by_layer(
+        self,
+        layer: int,
+        lag_pos: torch.Tensor,
+        *,
+        neg_n: int,
+        overflow_n: int,
+        le_counts_in: list[int] | None = None,
+        hist_cpu: torch.Tensor | None = None,
+    ) -> None:
+        if lag_pos.numel() == 0:
+            return
+
+        layer = int(layer)
+        lag_f = lag_pos.to(dtype=torch.float32)
+
+        n = int(lag_f.numel())
+        s = float(lag_f.sum().item())
+        ss = float((lag_f * lag_f).sum().item())
+        mn = float(lag_f.min().item())
+        mx = float(lag_f.max().item())
+
+        self.top1_lag_by_layer_n[layer] = self.top1_lag_by_layer_n.get(layer, 0) + n
+        self.top1_lag_by_layer_sum[layer] = self.top1_lag_by_layer_sum.get(layer, 0.0) + s
+        self.top1_lag_by_layer_sumsq[layer] = self.top1_lag_by_layer_sumsq.get(layer, 0.0) + ss
+        self.top1_lag_by_layer_min[layer] = min(self.top1_lag_by_layer_min.get(layer, math.inf), mn)
+        self.top1_lag_by_layer_max[layer] = max(self.top1_lag_by_layer_max.get(layer, -math.inf), mx)
+
+        self.top1_lag_neg_by_layer_n[layer] = self.top1_lag_neg_by_layer_n.get(layer, 0) + int(neg_n)
+        self.top1_lag_overflow_by_layer_n[layer] = self.top1_lag_overflow_by_layer_n.get(layer, 0) + int(
+            overflow_n
+        )
+
+        if hist_cpu is None:
+            lag_clip = lag_f.clamp_max(float(self.config.top1_lag_max))
+            hist_cpu = torch.histc(
+                lag_clip,
+                bins=int(self.config.top1_lag_bins),
+                min=0.0,
+                max=float(self.config.top1_lag_max),
+            ).to(dtype=torch.int64, device="cpu")
+        if layer in self.top1_lag_counts_by_layer:
+            self.top1_lag_counts_by_layer[layer] += hist_cpu
+        else:
+            self.top1_lag_counts_by_layer[layer] = hist_cpu
+
+        le_counts_buf = self.top1_lag_le_counts_by_layer.get(layer)
+        if le_counts_buf is None:
+            le_counts_buf = [0] * len(TOP1_LAG_LE_THRESHOLDS)
+            self.top1_lag_le_counts_by_layer[layer] = le_counts_buf
+        if le_counts_in is None:
+            lag_i = lag_pos.to(dtype=torch.int64)
+            if self._top1_lag_le_thr_t is None or self._top1_lag_le_thr_t.device != lag_i.device:
+                self._top1_lag_le_thr_t = torch.tensor(
+                    TOP1_LAG_LE_THRESHOLDS, device=lag_i.device, dtype=lag_i.dtype
+                )
+            c = (lag_i.unsqueeze(-1) <= self._top1_lag_le_thr_t).sum(dim=0).to(dtype=torch.int64, device="cpu")
+            le_counts_in = c.tolist()
+        for i, v in enumerate(le_counts_in):
+            le_counts_buf[i] += int(v)
 
     def _ensure_row_std_buffers(self, layer: int, n_heads: int) -> None:
         layer = int(layer)
@@ -365,9 +439,23 @@ class SoftmaxStatsCollector:
                                 offset = max(k_len - q_len, 0)
                                 query_pos = q_idx.to(dtype=torch.int64) + int(offset)
                                 lag = query_pos - top1_idx
-                                self.top1_lag_neg_n += int((lag < 0).sum().item())
+                                neg_n = int((lag < 0).sum().item())
+                                self.top1_lag_neg_n += neg_n
                                 lag_pos = lag.clamp_min(0)
-                                self.top1_lag_overflow_n += int((lag_pos > int(self.config.top1_lag_max)).sum().item())
+                                overflow_n = int((lag_pos > int(self.config.top1_lag_max)).sum().item())
+                                self.top1_lag_overflow_n += overflow_n
+
+                                lag_i = lag_pos.to(dtype=torch.int64)
+                                if self._top1_lag_le_thr_t is None or self._top1_lag_le_thr_t.device != lag_i.device:
+                                    self._top1_lag_le_thr_t = torch.tensor(
+                                        TOP1_LAG_LE_THRESHOLDS, device=lag_i.device, dtype=lag_i.dtype
+                                    )
+                                c = (lag_i.unsqueeze(-1) <= self._top1_lag_le_thr_t).sum(dim=0).to(
+                                    dtype=torch.int64, device="cpu"
+                                )
+                                le_counts = c.tolist()
+                                for i, v in enumerate(le_counts):
+                                    self._top1_lag_le_counts[i] += int(v)
 
                                 lag_f = lag_pos.to(dtype=torch.float32)
                                 if lag_f.numel():
@@ -384,7 +472,17 @@ class SoftmaxStatsCollector:
                                         min=0.0,
                                         max=float(self.config.top1_lag_max),
                                     )
-                                    self.top1_lag_counts += hist.to(dtype=torch.int64).cpu()
+                                    hist_cpu = hist.to(dtype=torch.int64).cpu()
+                                    self.top1_lag_counts += hist_cpu
+                                    if self.config.per_layer and self._current_layer is not None:
+                                        self._update_top1_lag_by_layer(
+                                            self._current_layer,
+                                            lag_pos,
+                                            neg_n=neg_n,
+                                            overflow_n=overflow_n,
+                                            le_counts_in=le_counts,
+                                            hist_cpu=hist_cpu,
+                                        )
 
                 if need_row_std:
                     n_rs = min(int(self.config.row_std_rows_per_call), int(rows_all.shape[0]))
@@ -534,6 +632,8 @@ class SoftmaxStatsCollector:
             "top1_lag_std": lag_std if self.top1_lag_n else None,
             "top1_lag_neg_ratio": self.top1_lag_neg_n / max(self.top1_lag_n, 1),
             "top1_lag_overflow_ratio": self.top1_lag_overflow_n / max(self.top1_lag_n, 1),
+            "top1_lag_le_thresholds": list(TOP1_LAG_LE_THRESHOLDS),
+            "top1_lag_le_ratio": [c / max(self.top1_lag_n, 1) for c in self._top1_lag_le_counts],
             "config": {
                 "sample_per_call": self.config.sample_per_call,
                 "max_calls": self.config.max_calls,
@@ -577,6 +677,29 @@ class SoftmaxStatsCollector:
                     "lt_thresholds": list(NORM_ENTROPY_LT_THRESHOLDS),
                     "lt_ratio": [c / n for c in lt_counts],
                 }
+        top1_lag_by_layer_summary: dict[str, Any] = {}
+        if self.config.per_layer and self.top1_lag_by_layer_n:
+            for layer in sorted(self.top1_lag_by_layer_n):
+                n = max(int(self.top1_lag_by_layer_n[layer]), 1)
+                mean = float(self.top1_lag_by_layer_sum[layer]) / n
+                var = max(float(self.top1_lag_by_layer_sumsq[layer]) / n - mean * mean, 0.0)
+                std = math.sqrt(var)
+                le_counts = self.top1_lag_le_counts_by_layer.get(layer) or [0] * len(TOP1_LAG_LE_THRESHOLDS)
+                top1_lag_by_layer_summary[str(layer)] = {
+                    "n": int(self.top1_lag_by_layer_n[layer]),
+                    "min": None
+                    if not math.isfinite(self.top1_lag_by_layer_min.get(layer, math.inf))
+                    else float(self.top1_lag_by_layer_min[layer]),
+                    "max": None
+                    if not math.isfinite(self.top1_lag_by_layer_max.get(layer, -math.inf))
+                    else float(self.top1_lag_by_layer_max[layer]),
+                    "mean": mean,
+                    "std": std,
+                    "neg_ratio": self.top1_lag_neg_by_layer_n.get(layer, 0) / n,
+                    "overflow_ratio": self.top1_lag_overflow_by_layer_n.get(layer, 0) / n,
+                    "le_thresholds": list(TOP1_LAG_LE_THRESHOLDS),
+                    "le_ratio": [c / n for c in le_counts],
+                }
         row_std_by_layer_head_summary: dict[str, Any] = {}
         if self.config.per_head and self.row_std_by_layer_head_n:
             for layer in sorted(self.row_std_by_layer_head_n):
@@ -611,6 +734,8 @@ class SoftmaxStatsCollector:
             "top1_lag_counts": self.top1_lag_counts,
             "entropy_norm_by_layer_summary": entropy_norm_by_layer_summary,
             "entropy_norm_counts_by_layer": self.entropy_norm_counts_by_layer,
+            "top1_lag_by_layer_summary": top1_lag_by_layer_summary,
+            "top1_lag_counts_by_layer": self.top1_lag_counts_by_layer,
             "row_std_by_layer_head_summary": row_std_by_layer_head_summary,
         }
 
@@ -637,6 +762,10 @@ class SoftmaxStatsCollector:
             payload["entropy_norm_by_layer_summary"] = state.get("entropy_norm_by_layer_summary", {})
             payload["entropy_norm_counts_by_layer"] = {
                 str(layer): counts.tolist() for layer, counts in self.entropy_norm_counts_by_layer.items()
+            }
+            payload["top1_lag_by_layer_summary"] = state.get("top1_lag_by_layer_summary", {})
+            payload["top1_lag_counts_by_layer"] = {
+                str(layer): counts.tolist() for layer, counts in self.top1_lag_counts_by_layer.items()
             }
         if self.config.per_head:
             payload["row_std_by_layer_head_summary"] = state.get("row_std_by_layer_head_summary", {})

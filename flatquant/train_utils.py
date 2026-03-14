@@ -2029,7 +2029,8 @@ def cali_softmax_alpha(args, model, dataloader, dev, logger):
             attn._ori_mode = True
             if mlp is not None:
                 mlp._ori_mode = True
-
+            for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
+                trans.use_x_mask=False
             alpha_saved = alpha_p.detach().clone()
             with torch.no_grad():
                 alpha_p.data.fill_(1.0)
@@ -2046,7 +2047,8 @@ def cali_softmax_alpha(args, model, dataloader, dev, logger):
                 attn._ori_mode = False
                 if mlp is not None:
                     mlp._ori_mode = False
-
+            for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
+                trans.use_x_mask=args.use_x_mask
             # Evaluate pre-train error.
             mse_pre = 0.0
             with torch.no_grad():

@@ -65,6 +65,10 @@ def _load_run(label: str, user_path: str) -> Run:
     if not isinstance(summary, dict):
         raise ValueError(f"Missing/invalid summary in {path}")
 
+    # Attach optional per-layer summaries from the .pt state_dict.
+    summary["entropy_norm_by_layer_summary"] = obj.get("entropy_norm_by_layer_summary") or {}
+    summary["top1_lag_by_layer_summary"] = obj.get("top1_lag_by_layer_summary") or {}
+
     config = summary.get("config") or {}
     if not isinstance(config, dict):
         raise ValueError(f"Missing/invalid summary.config in {path}")
@@ -142,6 +146,19 @@ def _plot_hist_compare(
     fig.tight_layout()
     fig.savefig(outpath, dpi=dpi)
     plt.close(fig)
+
+def _parse_top1_lag_by_layer_summary(summary: dict[str, Any]) -> tuple[list[int], list[float], list[float]]:
+    by_layer = summary.get("top1_lag_by_layer_summary") or {}
+    if not isinstance(by_layer, dict) or not by_layer:
+        raise ValueError("Missing top1_lag_by_layer_summary (did you enable --softmax_stats_per_layer?)")
+    layer_ids = sorted(int(k) for k in by_layer.keys())
+    means: list[float] = []
+    overflow_ratio: list[float] = []
+    for lid in layer_ids:
+        item = by_layer[str(lid)]
+        means.append(float(item.get("mean", float("nan"))))
+        overflow_ratio.append(float(item.get("overflow_ratio", float("nan"))))
+    return layer_ids, means, overflow_ratio
 
 
 def main() -> None:
@@ -279,6 +296,51 @@ def main() -> None:
             dpi=args.dpi,
         )
 
+    have_lag_by_layer = all(
+        isinstance(r.summary.get("top1_lag_by_layer_summary"), dict) and bool(r.summary.get("top1_lag_by_layer_summary"))
+        for r in runs
+    )
+    if have_lag_by_layer:
+        # Ensure top1_lag_max is consistent (used to interpret overflow ratio).
+        lag_max2 = _ensure_same_float(
+            "top1_lag_max", [float(r.config.get("top1_lag_max", 0.0)) for r in runs], labels=labels
+        )
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        parsed = []
+        for r in runs:
+            layer_ids, means, overflow_ratio = _parse_top1_lag_by_layer_summary(r.summary)
+            parsed.append((r.label, layer_ids, means, overflow_ratio))
+
+        x_layers = parsed[0][1]
+        for label, layer_ids, _means, _of in parsed[1:]:
+            if layer_ids != x_layers:
+                raise ValueError(f"Layer id mismatch vs first run: {label} has {layer_ids[:5]}... (len={len(layer_ids)})")
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9.0, 6.5), sharex=True)
+        for label, _layer_ids, means, overflow_ratio in parsed:
+            ax1.plot(x_layers, means, label=label, linewidth=1.8)
+            ax2.plot(x_layers, overflow_ratio, label=label, linewidth=1.8)
+
+        ax1.set_title("Per-layer top-1 lag (mean)")
+        ax1.set_ylabel("lag")
+        ax1.grid(True, alpha=0.25)
+        ax1.legend()
+
+        ax2.set_title(f"Per-layer overflow ratio (lag > {int(lag_max2)})")
+        ax2.set_xlabel("layer")
+        ax2.set_ylabel("ratio")
+        ax2.grid(True, alpha=0.25)
+
+        outpath = args.outdir / f"{pref}top1_lag_by_layer.png"
+        outpath.parent.mkdir(parents=True, exist_ok=True)
+        fig.tight_layout()
+        fig.savefig(outpath, dpi=args.dpi)
+        plt.close(fig)
+
     outdir = args.outdir.resolve()
     print(f"Saved plots to {outdir}")
     print(f"  - {outdir / f'{pref}log10_counts.png'}")
@@ -286,8 +348,9 @@ def main() -> None:
     print(f"  - {outdir / f'{pref}entropy_norm_counts.png'}")
     if have_lag:
         print(f"  - {outdir / f'{pref}top1_lag_counts.png'}")
+    if have_lag_by_layer:
+        print(f"  - {outdir / f'{pref}top1_lag_by_layer.png'}")
 
 
 if __name__ == "__main__":
     main()
-
