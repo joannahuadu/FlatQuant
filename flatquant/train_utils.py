@@ -2049,60 +2049,83 @@ def cali_softmax_alpha(args, model, dataloader, dev, logger):
                     mlp._ori_mode = False
             for trans in (layer.self_attn.ln_trans, layer.mlp.up_gate_trans, layer.mlp.down_trans):
                 trans.use_x_mask=args.use_x_mask
-            # Evaluate pre-train error.
-            mse_pre = 0.0
-            with torch.no_grad():
-                for j in range(0, args.nsamples, args.cali_bsz):
-                    bs = min(args.cali_bsz, args.nsamples - j)
-                    mask = (
-                        attention_mask_batch[:bs] if attention_mask_batch is not None and bs == args.cali_bsz
-                        else (attention_mask.repeat(bs, 1, 1, 1).float() if attention_mask is not None else None)
-                    )
-                    out = layer(fp_inps[j : j + bs], attention_mask=mask, position_ids=position_ids)[0]
-                    loss = loss_func(ref_outs[j : j + bs], out)
-                    mse_pre += float(loss.detach().cpu().item())
+            def _mask_for_batch(bs):
+                if attention_mask_batch is not None and bs == args.cali_bsz:
+                    return attention_mask_batch[:bs]
+                if attention_mask is not None:
+                    return attention_mask.repeat(bs, 1, 1, 1).float()
+                return None
 
-            # Train alpha for this layer.
-            alpha_init = float(alpha_p.detach().reshape(-1)[0].cpu().item())
-            alpha_p.requires_grad_(True)
-            optimizer = torch.optim.AdamW([alpha_p], lr=alpha_lr)
-            for epoch in range(alpha_epochs):
+            def _eval_alpha(alpha_value, write_outputs=False):
                 mse = 0.0
-                with traincast():
-                    for j in range(0, args.nsamples, args.cali_bsz):
-                        bs = min(args.cali_bsz, args.nsamples - j)
-                        mask = (
-                            attention_mask_batch[:bs] if attention_mask_batch is not None and bs == args.cali_bsz
-                            else (attention_mask.repeat(bs, 1, 1, 1).float() if attention_mask is not None else None)
-                        )
-                        out = layer(fp_inps[j : j + bs], attention_mask=mask, position_ids=position_ids)[0]
-                        loss = loss_func(ref_outs[j : j + bs], out)
-                        optimizer.zero_grad(set_to_none=True)
-                        loss.backward()
-                        optimizer.step()
-                        with torch.no_grad():
-                            alpha_p.data.clamp_(min=alpha_min, max=alpha_max)
-                        mse += float(loss.detach().cpu().item())
-                cur_alpha = float(alpha_p.detach().reshape(-1)[0].cpu().item())
-                logger.info(f"[softmax_alpha] layer {i} epoch {epoch} mse={mse:.8f} alpha={cur_alpha:.6f}")
+                with torch.no_grad():
+                    alpha_p.data.fill_(float(alpha_value))
+                    with traincast():
+                        for j in range(0, args.nsamples, args.cali_bsz):
+                            bs = min(args.cali_bsz, args.nsamples - j)
+                            out = layer(
+                                fp_inps[j : j + bs],
+                                attention_mask=_mask_for_batch(bs),
+                                position_ids=position_ids,
+                            )[0]
+                            if write_outputs:
+                                fp_outs[j : j + bs] = out
+                            loss = loss_func(ref_outs[j : j + bs], out)
+                            mse += float(loss.detach().cpu().item())
+                return mse
 
-            alpha_p.requires_grad_(False)
+            # Evaluate pre-train error.
+            alpha_init = float(alpha_p.detach().reshape(-1)[0].cpu().item())
+            alpha_init = min(max(alpha_init, alpha_min), alpha_max)
+            mse_pre = _eval_alpha(alpha_init)
+
+            # Explicit 1D search for alpha: test down/current/up and only accept improvements.
+            current_alpha = alpha_init
+            current_mse = mse_pre
+            step = max(float(alpha_lr), 1e-4)
+            step_min = max(step * 1e-3, 1e-5)
+            for epoch in range(alpha_epochs):
+                candidates = [current_alpha]
+                alpha_down = max(alpha_min, current_alpha - step)
+                alpha_up = min(alpha_max, current_alpha + step)
+                if alpha_down < current_alpha:
+                    candidates.append(alpha_down)
+                if alpha_up > current_alpha:
+                    candidates.append(alpha_up)
+
+                scored = []
+                for cand in candidates:
+                    mse = current_mse if cand == current_alpha else _eval_alpha(cand)
+                    scored.append((mse, cand))
+
+                best_mse, best_alpha = min(scored, key=lambda x: x[0])
+                moved = abs(best_alpha - current_alpha) > 0.0
+                direction = "stay"
+                if moved:
+                    direction = "up" if best_alpha > current_alpha else "down"
+                    current_alpha = best_alpha
+                    current_mse = best_mse
+                    alpha_p.data.fill_(current_alpha)
+                else:
+                    step *= 0.5
+                    alpha_p.data.fill_(current_alpha)
+
+                logger.info(
+                    f"[softmax_alpha] layer {i} epoch {epoch} mse={current_mse:.8f} "
+                    f"alpha={current_alpha:.6f} step={step:.6f} direction={direction}"
+                )
+
+                if not moved and step < step_min:
+                    logger.info(
+                        f"[softmax_alpha] layer {i} early stop: no improvement and step {step:.6f} < {step_min:.6f}"
+                    )
+                    break
+
             alpha_final = float(alpha_p.detach().reshape(-1)[0].cpu().item())
             alpha_by_layer.append(alpha_final)
 
-            # Evaluate post-train error and produce outputs for downstream layers.
-            mse_post = 0.0
-            with torch.no_grad():
-                for j in range(0, args.nsamples, args.cali_bsz):
-                    bs = min(args.cali_bsz, args.nsamples - j)
-                    mask = (
-                        attention_mask_batch[:bs] if attention_mask_batch is not None and bs == args.cali_bsz
-                        else (attention_mask.repeat(bs, 1, 1, 1).float() if attention_mask is not None else None)
-                    )
-                    out = layer(fp_inps[j : j + bs], attention_mask=mask, position_ids=position_ids)[0]
-                    fp_outs[j : j + bs] = out
-                    loss = loss_func(ref_outs[j : j + bs], out)
-                    mse_post += float(loss.detach().cpu().item())
+            # Evaluate post-search error and produce outputs for downstream layers.
+            mse_post = _eval_alpha(alpha_final, write_outputs=True)
 
             logger.info(
                 f"[softmax_alpha] layer {i} done: alpha {alpha_init:.6f}->{alpha_final:.6f} "
